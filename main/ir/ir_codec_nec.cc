@@ -38,32 +38,37 @@ std::optional<RawSignal> NecCodec::Encode(const IrCode& code) const {
 
 std::optional<IrCode> NecCodec::Decode(const RawSignal& sig) const {
     const auto& d = sig.durations_us;
-    if (d.size() < 4) return std::nullopt;
+    if (d.size() < 2) return std::nullopt;
 
-    // 1) 定位 AGC 段：跳过前导噪声（如起始 off 段），找到 ≈9000us 的 on 段
+    // 1) 定位 AGC 段：跳过前导噪声段，再跳过「前导重复帧」（重复帧后还有下一对才算前导）
     size_t i = 0;
-    while (i < d.size() && d[i] < kAgcOnUs - kAgcTolUs) i += 2;  // 奇数段跳过一个 on 及其 off
+    while (i < d.size() && d[i] < kAgcOnUs - kAgcTolUs) i += 2;
+    while (i + 2 < d.size() && Near(d[i], kAgcOnUs, kAgcTolUs) &&
+           Near(d[i + 1], kRepeatOffUs, kBitTolUs)) {
+        i += 2;  // 前导重复帧（长按捕获从重复帧开始）
+    }
     if (i >= d.size()) return std::nullopt;
     if (!Near(d[i], kAgcOnUs, kAgcTolUs)) return std::nullopt;
 
-    // 2) AGC off：4500 = 数据帧，2250 = 重复帧
+    // 2) AGC off：4500 = 数据帧，2250 = 重复帧（独立重复帧直接返回）
     if (i + 1 >= d.size()) return std::nullopt;
     IrCode code;
     code.protocol = Name();
     if (Near(d[i + 1], kRepeatOffUs, kBitTolUs)) {
-        // 重复帧：无数据内容
         code.repeat = true;
         code.bits = 0;
         return code;
     }
     if (!Near(d[i + 1], kAgcOffUs, kAgcTolUs)) return std::nullopt;
 
-    // 3) 解析数据位（LSB-first），直到序列耗尽
+    // 3) 解析数据位（LSB-first）；遇重复帧起始（≈9000/2250）即结束数据位
     i += 2;
     uint64_t data = 0;
     uint16_t bit = 0;
     while (i + 1 < d.size()) {
-        // on 段必须是位脉冲
+        if (Near(d[i], kAgcOnUs, kAgcTolUs) && Near(d[i + 1], kRepeatOffUs, kBitTolUs)) {
+            break;  // 重复帧起始（长按捕获：数据帧后跟重复帧）
+        }
         if (!Near(d[i], kBitOnUs, kBitTolUs)) return std::nullopt;
         uint32_t off = d[i + 1];
         if (off < kZeroMaxUs) {
@@ -75,6 +80,12 @@ std::optional<IrCode> NecCodec::Decode(const RawSignal& sig) const {
         }
         bit++;
         if (bit > 32) return std::nullopt;  // 超出 NEC 上限
+        i += 2;
+    }
+
+    // 4) 吃掉帧尾重复帧（长按捕获的尾部）
+    while (i + 1 < d.size() && Near(d[i], kAgcOnUs, kAgcTolUs) &&
+           Near(d[i + 1], kRepeatOffUs, kBitTolUs)) {
         i += 2;
     }
 
