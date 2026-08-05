@@ -1893,6 +1893,22 @@ private:
             if (tool != nullptr) tool->set_async(true);
         }
 
+        // self.ir.learn_cancel —— 取消当前语音学习（用户要求跳过/中止按键时）
+        mcp.AddTool(
+            "self.ir.learn_cancel",
+            "Cancel the current voice learning task. Use it when the user wants to skip "
+            "or abort learning the current button (e.g. user says 跳过/取消/不学这个键). "
+            "The pending learn_start call will be answered with a cancelled result, then "
+            "guide the user to the next button or finish.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                if (!ir_learn_voice_ || ir_learn_key_.empty()) {
+                    return std::string("当前没有进行中的语音学习任务");
+                }
+                ir_service_.LearnCancel();  // 触发 kIdle("学习已取消") → 状态监听器回复 learn_start
+                return std::string("已取消当前学习");
+            });
+
         // self.ir.list —— 查询已学设备与按键
         mcp.AddTool(
             "self.ir.list",
@@ -2011,13 +2027,15 @@ private:
         McpServer::GetInstance().ReplyAsyncResult(result);
     }
 
-    // 语音学习超时/取消：异步回复"未捕获"并清理状态
-    void HandleVoiceLearnTimeout() {
+    // 语音学习结束（超时/取消）：异步回复挂起的 learn_start 调用并清理状态
+    void HandleVoiceLearnEnd(const std::string& detail) {
         if (!ir_learn_voice_ || ir_learn_key_.empty()) return;
         ir_learn_voice_ = false;
         ir_learn_key_.clear();
+        bool cancelled = detail.find("取消") != std::string::npos;
         McpServer::GetInstance().ReplyAsyncResult(
-            "超时：未捕获到信号，请让用户对准设备正面再按一次遥控器按键");
+            cancelled ? "学习已取消（用户跳过该按键）"
+                      : "超时：未捕获到信号，请让用户对准设备正面再按一次遥控器按键");
     }
 
     // ---- FR-08：红外状态反馈（LED 闪烁 / 舵机点头 / 通知 / 语音学习驱动）----
@@ -2039,10 +2057,9 @@ private:
                 if (servo_ok_) servo_.Nod();          // 物理点头反馈
             } else if (detail.rfind("已保存", 0) == 0) {
                 FlashLed(Rgb888To565(0, 200, 80));   // 学习保存：绿色
-            } else if (detail.rfind("学习超时", 0) == 0) {
-                HandleVoiceLearnTimeout();           // 语音学习超时：异步回复
-                RestoreStateLed();
             } else {
+                // 语音学习结束（超时/取消）：异步回复挂起的 learn_start
+                if (ir_learn_voice_) HandleVoiceLearnEnd(detail);
                 RestoreStateLed();                   // 取消/超时：恢复状态灯
             }
         }
