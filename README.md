@@ -1,0 +1,152 @@
+# Stackchan-HtSz: M5Stack Core S3 Stack-chan 个性化增强固件
+
+基于 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 的 M5Stack Core S3 Stack-chan 增强固件。在原版语音交互基础上增加了触摸、体感、情绪灯、舵机等交互能力，侧重**陪伴感**体验。
+
+> 搓了五天，来回烧录测试了小几百次。分享版抹掉了个性化设置（人设、文案池等），大家实际使用时自定义内容依然很多。不至于像我一样花五天，但建议预留至少半天加载个性化信息并测试。
+
+## 功能一览
+
+### 头顶触摸 (SI12T)
+- 3区电容触摸，摸头触发对话
+- 7条随机触摸回应文本（可自定义）
+- 5秒触发冷却
+- 抗EMI：0xCC灵敏度 + 12秒FTC校准等待（基于 M5Stack BSP 参考实现和 TS12 datasheet）
+
+### 体感检测 (BMI270)
+- **摇晃检测**：摇一摇触发互动
+- **抱起检测**：拿起来触发互动
+- 5分钟全局冷却，armed/disarmed 状态机
+- 自定义 BMI270 驱动（地址 0x69，绕过 SDK 默认 0x68）
+
+### 屏幕触摸 (FT6336)
+- 双击、上下左右滑动、长按 6 种手势
+- 60 条随机动作文本（可自定义）
+
+### WS2812 情绪灯环
+- 12颗 LED，通过 PY32 IO Expander (0x6F) 控制
+- 21种情绪对应颜色映射，跟表情同步变化
+- MCP 工具支持：`self.led.set_color`、`self.led.turn_off`、`self.led.auto`
+
+### 舵机 (SCS 总线)
+- 摄像头人脸追踪 (GC0308)
+- 空闲扫视动画
+- 对话时暂停/恢复
+
+### 早安问候 (定时任务)
+- 工作日早上定时问候 + 天气查询
+- SNTP 延迟启动（避免 tcpip panic）
+
+### 自定义唤醒词
+- Multinet6 自定义唤醒词支持
+- 通过 `sdkconfig.defaults` 配置
+
+### 其他
+- I2C 错误容错处理（防止偶发超时导致整机重启）
+- 摄像头拍照（MCP 工具）
+- 电池监测 + 低电量提醒
+
+## 已知问题和注意事项
+
+1. **负载过大时可能无法开机**：电池供电 + 灯全亮时偶尔出现。已改为对话才亮灯，但不排除仍可能发生。解决办法：插 USB 再开机。
+
+2. **LLM 控灯偶尔卡住**：让 LLM 调灯时有概率卡住。可以加看门狗，目前未实现。
+
+3. **LLM 口头说调灯但实际不动**：prompt 里加了强制要求但不保证每次生效。
+
+4. **自定义灯光后需要物理重启**：烧录后需要拔 USB + 关机，等 30 秒后再插 USB 重启。尝试过用软件方式免除但未成功。换色不频繁的话影响不大。
+
+5. **唤醒词灵敏度需自行调整**：默认阈值可能在易误触发和需要大声喊之间摇摆，请在 `sdkconfig.defaults` 里调整 `CONFIG_CUSTOM_WAKE_WORD_THRESHOLD` 找到适合自己环境的值。另外灵敏度和唤醒词本身关系很大——生僻词/自定义人名的识别率天然低于"你好小智"这类常见词组，阈值需要设得更低（更灵敏）才能触发，但相应误触发概率也会增加。
+
+6. **自部署小智服务端的朋友注意安全配置**：
+① 服务端的 websocket 和 http 端口不要直接暴露公网，用防火墙限制访问来源
+② config 里的 auth.enabled 一定要改成 true，加上你设备的 MAC 白名单
+③ TTS、LLM 这些第三方 API Key 不要写在配置文件里暴露着，端口一旦被扫到配置就全泄露了
+④ 小智有摄像头调用能力，端口裸奔等于把摄像头开放给任何人
+⑤ 公网端口扫描是常态，部署完记得 ss -tlnp 检查一下自己开了哪些端口。安全无小事。
+
+## 编译 & 烧录
+
+### 环境要求
+
+- **ESP-IDF v5.5.x**（必须，其他版本未测试）
+- **工具链路径**（Windows）：`D:\Espressif\tools\`
+- **Python 虚拟环境**：`D:\Espressif\python_env\idf5.5_py3.10_env`
+- **设备**：M5Stack Core S3，串口 COM6
+
+### Windows 编译
+
+ESP-IDF 自带的 `idf.py` 在 Git Bash/MSys2 下会报 `MSys/Mingw is no longer supported`。必须用 **cmd.exe** 或创建 `.bat` 文件运行：
+
+```batch
+set MSYSTEM=
+set IDF_PATH=D:\esp-idf
+set IDF_TOOLS_PATH=D:\Espressif
+set IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf5.5_py3.10_env
+set PATH=D:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20260121\xtensa-esp-elf\bin;D:\Espressif\tools\ninja\1.12.1;D:\Espressif\tools\cmake\3.30.2\bin;D:\Espressif\tools\idf-exe\1.0.3;D:\Espressif\python_env\idf5.5_py3.10_env\Scripts;%PATH%
+cd /d D:\Stackchan
+python D:\esp-idf\tools\idf.py build
+```
+
+项目根目录已提供 `build.bat`，双击即可编译。
+
+### 烧录
+
+```batch
+set MSYSTEM=
+set IDF_PATH=D:\esp-idf
+set IDF_TOOLS_PATH=D:\Espressif
+...（同上设置环境变量）...
+python D:\esp-idf\tools\idf.py -p COM6 flash
+```
+
+`idf.py flash` 通过 RTS/DTR 信号线自动控制芯片进入下载模式，**无需手动按键**。COM6 是设备串口号，请根据实际环境修改。
+
+### 完整烧录分区
+
+首次烧录或分区表变更后需写入全部分区：
+
+```
+0x0        bootloader.bin
+0x8000     partition-table.bin
+0xd000     ota_data_initial.bin
+0x10000    srmodels.bin        (语音模型 ~3.9MB)
+0x410000   xiaozhi.bin         (主固件 ~2.8MB)
+0xa10000   generated_assets.bin (资源 ~5MB)
+```
+
+## 配置
+
+编译前修改 `sdkconfig.defaults`：
+
+```
+CONFIG_BOARD_TYPE_M5STACK_CORE_S3=y
+CONFIG_USE_CUSTOM_WAKE_WORD=y
+CONFIG_CUSTOM_WAKE_WORD="tu dou tu dou"
+CONFIG_CUSTOM_WAKE_WORD_DISPLAY="土豆土豆"
+CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=35
+CONFIG_OTA_URL="http://你的服务器IP:8003/xiaozhi/ota/"
+```
+
+## 服务端
+
+本固件配合 [xiaozhi-esp32-server](https://github.com/78/xiaozhi-esp32-server) 使用。需要在服务端配置 LLM 和 TTS。
+
+## 自定义
+
+`m5stack_core_s3.cc` 中的触摸文本、手势动作、早安问候等使用通用占位符（主人/小智）。替换成你自己的人设文本即可。
+
+主要自定义点：
+- **触摸回应**：搜索 `msgs[]` 数组
+- **手势动作池**：搜索 `DoubleClickPool`、`UpSwipePool` 等函数
+- **早安问候**：搜索 `MorningLoop`
+- **情绪灯颜色**：搜索 `UpdateLedsFromEmotion`
+
+## 致谢
+
+- [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) — 基础固件
+- [M5Stack StackChan-BSP](https://github.com/m5stack/StackChan-BSP) — SI12T 驱动参考
+- [TS12 Datasheet](http://file2.dzsc.com/product/18/09/06/1114361_130715119.pdf) — 触摸传感器寄存器文档
+
+## License
+
+同上游 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32)。
