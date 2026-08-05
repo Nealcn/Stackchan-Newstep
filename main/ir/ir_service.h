@@ -87,6 +87,11 @@ private:
     std::string detail_;
     int64_t learn_deadline_us_ = 0;
     IrCode captured_code_;  // LearnPoll 捕获成功时记录（kCaptured 状态有效）
+
+    // 学习轮询定时器：LearnStart 启动（100ms 周期），状态离开 kLearning/kCaptured 时停止。
+    // 保证语音学习（无 LVGL 定时器驱动）也能推进捕获/超时；与屏内轮询互斥安全。
+    esp_timer_handle_t learn_timer_ = nullptr;
+    static void LearnPollTimerCb(void* arg);
 };
 
 }  // namespace stackchan_ir

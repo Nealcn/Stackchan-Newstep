@@ -27,10 +27,19 @@ IrState IrService::state() const {
 void IrService::SetState(IrState state, const std::string& detail) {
     state_ = state;
     detail_ = detail;
+    // 学习结束（离开 kLearning/kCaptured）：停止轮询定时器
+    if (state != IrState::kLearning && state != IrState::kCaptured && learn_timer_ != nullptr) {
+        esp_timer_stop(learn_timer_);
+    }
     ESP_LOGI(kTag, "state -> %d (%s)", (int)state, detail.c_str());
     if (listener_) {
         listener_(state_, detail_);
     }
+}
+
+// 学习轮询：语音学习（无 LVGL 定时器）也需要推进捕获/超时；与屏内轮询互斥安全
+void IrService::LearnPollTimerCb(void* arg) {
+    static_cast<IrService*>(arg)->LearnPoll(nullptr);
 }
 
 bool IrService::Emit(const std::string& device_id, const std::string& key, std::string* err) {
@@ -91,6 +100,15 @@ bool IrService::LearnStart(int timeout_ms) {
     }
     int ms = timeout_ms > 0 ? timeout_ms : STACKCHAN_IR_LEARN_DEFAULT_MS;
     learn_deadline_us_ = esp_timer_get_time() + (int64_t)ms * 1000;
+    // 启动学习轮询定时器（100ms），推进捕获/超时；状态离开学习时自动停止
+    if (learn_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = LearnPollTimerCb;
+        args.arg = this;
+        args.name = "ir_learn_poll";
+        esp_timer_create(&args, &learn_timer_);
+    }
+    esp_timer_start_periodic(learn_timer_, 100 * 1000);
     SetState(IrState::kLearning, "请对准遥控器按按键");
     xSemaphoreGive(mutex_);
     return true;
