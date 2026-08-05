@@ -7,6 +7,8 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+#include "ir/ir_service.h"
+#include "ir/ir_config.h"
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -1360,6 +1362,11 @@ private:
     bool pet_triggered_ = false;
     bool pending_single_release_ = false;
     int64_t pending_single_release_time_ = 0;
+    // ---- 红外模块（本项目新增）----
+    stackchan_ir::IrDriver ir_driver_;
+    stackchan_ir::IrStore ir_store_;
+    stackchan_ir::IrService ir_service_;
+    esp_timer_handle_t pan_restore_timer_ = nullptr;  // RS-4：联动转向后恢复人脸跟随
 
     void InitializeBmi270() {
         // BMI270 实际在 0x69（不是 SDK 默认的 0x68），自己用 IDF i2c API + 底层 bmi270_init 绕过硬编码
@@ -1765,6 +1772,133 @@ private:
                 ESP_LOGI(TAG, "MCP LED auto mode");
                 return true;
             });
+    }
+
+    // ---- 红外模块集成（本项目新增：P3.1）----
+    // 恢复人脸跟随：遵循基线 SetStatus 的语义——仅 Listening/Speaking 时跟随，
+    // Idle 保持暂停（含待机扫视）。避免发码/转向结束后破坏对话状态的暂停逻辑。
+    void RestoreFaceTracker() {
+        auto state = Application::GetInstance().GetDeviceState();
+        if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+            face_tracker_.Resume();
+        } else {
+            face_tracker_.Pause();
+        }
+    }
+
+    void InitializeIr() {
+        ir_store_.Init();
+        esp_err_t err = ir_driver_.Init(STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "IR driver init failed (%d): IR 功能禁用（需配置 ir_config.h 引脚，TC-8）", err);
+            return;
+        }
+        ir_service_.Attach(&ir_driver_, &ir_store_);
+        // RS-1：红外发码期间暂停摄像头采集（人脸跟随暂停），发码后按设备状态恢复
+        ir_service_.SetCameraPauseHook([this](bool paused) {
+            if (paused) {
+                face_tracker_.Pause(false);  // 暂停跟随且不恢复扫视
+            } else {
+                RestoreFaceTracker();
+            }
+        });
+        RegisterIrMcpTools();
+        ESP_LOGI(TAG, "IR service ready (tx=GPIO%d rx=GPIO%d)",
+                 STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
+    }
+
+    void RegisterIrMcpTools() {
+        auto& mcp = McpServer::GetInstance();
+
+        // self.ir.send —— 发射指定设备按键码（联动链路核心工具）
+        {
+            std::string desc =
+                "Send an IR remote control code to an appliance (air conditioner, TV, etc.). "
+                "If the head needs to aim at the appliance, call self.servo.pan first. "
+                "Available devices and keys: ";
+            auto devices = ir_service_.ListDevices();
+            if (devices.empty()) {
+                desc += "none yet — the user must learn remotes first via the on-device "
+                        "touch screen learning wizard.";
+            } else {
+                bool first = true;
+                for (const auto& dev : devices) {
+                    if (!first) desc += "; ";
+                    first = false;
+                    desc += dev.id + " (name=" + dev.name + ", type=" + dev.type + "), keys: ";
+                    bool kfirst = true;
+                    for (const auto& kv : dev.keys) {
+                        if (!kfirst) desc += ",";
+                        kfirst = false;
+                        desc += kv.first;
+                    }
+                }
+            }
+            mcp.AddTool("self.ir.send", desc,
+                        PropertyList({Property("device", kPropertyTypeString),
+                                      Property("key", kPropertyTypeString)}),
+                        [this](const PropertyList& props) -> ReturnValue {
+                            std::string device = props["device"].value<std::string>();
+                            std::string key = props["key"].value<std::string>();
+                            std::string err;
+                            if (ir_service_.Emit(device, key, &err)) {
+                                return true;
+                            }
+                            // 失败信息携带可用设备清单，供 LLM 反馈并重试
+                            return std::string("IR send failed: ") + err;
+                        });
+        }
+
+        // self.ir.learn —— v1 学习入口在机身遥控屏（离线可用，DP-7）；此工具引导用户
+        mcp.AddTool(
+            "self.ir.learn",
+            "Guide the user to learn a new IR remote control code. Learning is done on the "
+            "device's touch screen (remote screen → learn wizard). When the user asks to "
+            "learn a remote, instruct them to use the on-device learning screen.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return std::string(
+                    "红外学习请在机身触摸屏完成：进入遥控屏 → 选择设备 → 学习模式 → "
+                    "对准原装遥控器按按键。");
+            });
+
+        // self.servo.pan —— 云台转向（联动对准家电），2s 后自动恢复人脸跟随（RS-4）
+        mcp.AddTool(
+            "self.servo.pan",
+            "Turn the robot's pan-tilt head to aim at a direction. Use it before self.ir.send "
+            "so the IR emitter points at the target appliance. yaw: -45 (left) .. 45 (right) "
+            "degrees; pitch: 5 (down) .. 60 (up) degrees. Face tracking resumes automatically "
+            "after 2 seconds.",
+            PropertyList({Property("yaw", kPropertyTypeInteger, -45, 45),
+                          Property("pitch", kPropertyTypeInteger, 5, 60)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                if (!servo_ok_) {
+                    return std::string("servo not available");
+                }
+                int yaw = props["yaw"].value<int>();
+                int pitch = props["pitch"].value<int>();
+                face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
+                servo_.MoveTo(yaw, pitch, 400);
+                SchedulePanRestore();
+                return true;
+            });
+    }
+
+    // RS-4：联动转向 2s 后恢复人脸跟随（定时器可复用，重复调用先停旧）
+    void SchedulePanRestore() {
+        if (pan_restore_timer_ == nullptr) {
+            esp_timer_create_args_t args = {};
+            args.callback = [](void* arg) {
+                static_cast<M5StackCoreS3Board*>(arg)->RestoreFaceTracker();
+            };
+            args.arg = this;
+            args.dispatch_method = ESP_TIMER_TASK;
+            args.name = "pan_restore";
+            esp_timer_create(&args, &pan_restore_timer_);
+        } else {
+            esp_timer_stop(pan_restore_timer_);
+        }
+        esp_timer_start_once(pan_restore_timer_, 2 * 1000 * 1000);
     }
 
     void InitializePowerSaveTimer() {
@@ -2205,6 +2339,7 @@ public:
                 Py32SetLedFrame(off, 12);            // 待机：灭
             }
         });
+        InitializeIr();
         InitializeFt6336TouchPad();
         InitializeBmi270();
         InitializeSi12T();
