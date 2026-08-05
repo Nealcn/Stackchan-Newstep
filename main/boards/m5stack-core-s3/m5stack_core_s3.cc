@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "ir/ir_service.h"
 #include "ir/ir_config.h"
+#include "ir_remote_screen.h"
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -1367,6 +1368,8 @@ private:
     stackchan_ir::IrStore ir_store_;
     stackchan_ir::IrService ir_service_;
     esp_timer_handle_t pan_restore_timer_ = nullptr;  // RS-4：联动转向后恢复人脸跟随
+    IrRemoteScreen ir_remote_screen_;
+    bool remote_screen_open_ = false;  // 遥控屏打开标志（触控语义让渡，RS-3）
 
     void InitializeBmi270() {
         // BMI270 实际在 0x69（不是 SDK 默认的 0x68），自己用 IDF i2c API + 底层 bmi270_init 绕过硬编码
@@ -1884,6 +1887,25 @@ private:
             });
     }
 
+    // 遥控屏初始化：LVGL 输入设备读取 FT6336；打开时让渡手势语义（RS-3）
+    void InitializeIrRemoteScreen() {
+        ir_remote_screen_.Init(
+            display_, &ir_service_,
+            [this](lv_indev_t*, lv_indev_data_t* data) {
+                ft6336_->UpdateTouchPoint();
+                const auto& tp = ft6336_->GetTouchPoint();
+                if (tp.num > 0) {
+                    data->point.x = tp.x;
+                    data->point.y = tp.y;
+                    data->state = LV_INDEV_STATE_PRESSED;
+                } else {
+                    data->state = LV_INDEV_STATE_RELEASED;
+                }
+            },
+            [this](bool open) { remote_screen_open_ = open; });
+        ESP_LOGI(TAG, "IR remote screen ready (双指触摸打开)");
+    }
+
     // RS-4：联动转向 2s 后恢复人脸跟随（定时器可复用，重复调用先停旧）
     void SchedulePanRestore() {
         if (pan_restore_timer_ == nullptr) {
@@ -2117,6 +2139,12 @@ private:
             }
         }
 
+        // 红外遥控屏打开时：触摸仅用于唤醒，手势逻辑让渡给 LVGL（RS-3）
+        if (remote_screen_open_) {
+            ResetTouchState();
+            return;
+        }
+
         if (touch_point.num > 0 && !was_touched_) {
             // 按下
             was_touched_ = true;
@@ -2129,6 +2157,12 @@ private:
             touch_total_move_ = 0;
         }
         else if (touch_point.num > 0 && was_touched_) {
+            // 双指按下 → 打开红外遥控屏（手势语义切到遥控屏，RS-3）
+            if (touch_point.num >= 2) {
+                ResetTouchState();
+                ir_remote_screen_.Open();
+                return;
+            }
             // 按住中 — 累积移动距离
             touch_total_move_ += abs(touch_point.x - touch_last_x_) + abs(touch_point.y - touch_last_y_);
             touch_last_x_ = touch_point.x;
@@ -2341,6 +2375,7 @@ public:
         });
         InitializeIr();
         InitializeFt6336TouchPad();
+        InitializeIrRemoteScreen();
         InitializeBmi270();
         InitializeSi12T();
         InitializeMorningGreeting();
