@@ -99,6 +99,15 @@ bool IrStore::RemoveKey(const std::string& device_id, const std::string& key) {
     return Save();
 }
 
+bool IrStore::SetDevicePan(const std::string& device_id, int yaw, int pitch) {
+    auto it = devices_.find(device_id);
+    if (it == devices_.end()) return false;
+    it->second.pan_yaw = yaw;
+    it->second.pan_pitch = pitch;
+    it->second.has_pan = true;
+    return Save();
+}
+
 bool IrStore::GetKey(const std::string& device_id, const std::string& key, IrCode* out) const {
     auto it = devices_.find(device_id);
     if (it == devices_.end()) return false;
@@ -142,6 +151,17 @@ bool IrStore::ParseJson(const std::string& json) {
             dev.id = id->valuestring;
             dev.type = cJSON_IsString(type) && type->valuestring ? type->valuestring : "";
             dev.name = cJSON_IsString(name) && name->valuestring ? name->valuestring : dev.id;
+            // 云台方位预设（可选）
+            const cJSON* pan = cJSON_GetObjectItem(item, "pan");
+            if (cJSON_IsObject(pan)) {
+                const cJSON* yaw = cJSON_GetObjectItem(pan, "yaw");
+                const cJSON* pitch = cJSON_GetObjectItem(pan, "pitch");
+                if (cJSON_IsNumber(yaw) && cJSON_IsNumber(pitch)) {
+                    dev.pan_yaw = yaw->valueint;
+                    dev.pan_pitch = pitch->valueint;
+                    dev.has_pan = true;
+                }
+            }
             if (cJSON_IsObject(keys)) {
                 const cJSON* key = nullptr;
                 cJSON_ArrayForEach(key, keys) {
@@ -183,6 +203,12 @@ std::string IrStore::ExportToJson() const {
         cJSON_AddStringToObject(item, "id", dev.id.c_str());
         cJSON_AddStringToObject(item, "type", dev.type.c_str());
         cJSON_AddStringToObject(item, "name", dev.name.c_str());
+        if (dev.has_pan) {
+            cJSON* pan = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pan, "yaw", dev.pan_yaw);
+            cJSON_AddNumberToObject(pan, "pitch", dev.pan_pitch);
+            cJSON_AddItemToObject(item, "pan", pan);
+        }
         cJSON* keys = cJSON_AddObjectToObject(item, "keys");
         for (const auto& kkv : dev.keys) {
             cJSON* code = cJSON_CreateObject();

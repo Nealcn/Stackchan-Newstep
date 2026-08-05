@@ -16,6 +16,10 @@ struct DeviceInfo {
     std::string type;  // 设备类型（"空调"/"电视"）
     std::string name;  // 显示名（"客厅空调"）
     std::map<std::string, IrCode> keys;  // 按键名 → 码
+    // 云台方位预设（DAT-2：语音联动「先转向家电方位再发码」）
+    int pan_yaw = 0;    // 偏航（-45..45）
+    int pan_pitch = 0;  // 俯仰（5..60）
+    bool has_pan = false;
 
     bool Valid() const { return !id.empty(); }
 };
@@ -30,6 +34,7 @@ public:
     bool RemoveDevice(const std::string& id);
     bool SetKey(const std::string& device_id, const std::string& key, const IrCode& code);
     bool RemoveKey(const std::string& device_id, const std::string& key);
+    bool SetDevicePan(const std::string& device_id, int yaw, int pitch);  // DAT-2 方位预设
     bool GetKey(const std::string& device_id, const std::string& key, IrCode* out) const;
     const DeviceInfo* FindDevice(const std::string& id) const;
 

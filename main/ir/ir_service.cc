@@ -176,6 +176,24 @@ std::vector<DeviceInfo> IrService::ListDevices() const {
     return store_->ListDevices();
 }
 
+bool IrService::SetDevicePan(const std::string& device_id, int yaw, int pitch) {
+    if (mutex_ == nullptr || store_ == nullptr) return false;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    bool ok = store_->SetDevicePan(device_id, yaw, pitch);
+    xSemaphoreGive(mutex_);
+    if (ok) ESP_LOGI(kTag, "pan preset saved: %s yaw=%d pitch=%d", device_id.c_str(), yaw, pitch);
+    return ok;
+}
+
+bool IrService::GetDevicePan(const std::string& device_id, int* yaw, int* pitch) const {
+    if (store_ == nullptr) return false;
+    const auto* dev = store_->FindDevice(device_id);
+    if (dev == nullptr || !dev->has_pan) return false;
+    if (yaw != nullptr) *yaw = dev->pan_yaw;
+    if (pitch != nullptr) *pitch = dev->pan_pitch;
+    return true;
+}
+
 bool IrService::GetKey(const std::string& device_id, const std::string& key, IrCode* out) const {
     if (store_ == nullptr) return false;
     return store_->GetKey(device_id, key, out);

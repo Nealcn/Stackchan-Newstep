@@ -1835,7 +1835,13 @@ private:
                 for (const auto& dev : devices) {
                     if (!first) desc += "; ";
                     first = false;
-                    desc += dev.id + " (name=" + dev.name + ", type=" + dev.type + "), keys: ";
+                    desc += dev.id + " (name=" + dev.name + ", type=" + dev.type;
+                    if (dev.has_pan) {
+                        // DAT-2：已记录的云台方位预设，self.servo.pan 直接使用
+                        desc += ", pan(yaw=" + std::to_string(dev.pan_yaw) +
+                                ",pitch=" + std::to_string(dev.pan_pitch) + ")";
+                    }
+                    desc += "), keys: ";
                     bool kfirst = true;
                     for (const auto& kv : dev.keys) {
                         if (!kfirst) desc += ",";
@@ -1873,20 +1879,30 @@ private:
             });
 
         // self.servo.pan —— 云台转向（联动对准家电），2s 后自动恢复人脸跟随（RS-4）
+        // device 参数（可选）：提供时把当前角度保存为该设备的云台方位预设（DAT-2）
         mcp.AddTool(
             "self.servo.pan",
             "Turn the robot's pan-tilt head to aim at a direction. Use it before self.ir.send "
             "so the IR emitter points at the target appliance. yaw: -45 (left) .. 45 (right) "
-            "degrees; pitch: 5 (down) .. 60 (up) degrees. Face tracking resumes automatically "
-            "after 2 seconds.",
-            PropertyList({Property("yaw", kPropertyTypeInteger, -45, 45),
-                          Property("pitch", kPropertyTypeInteger, 5, 60)}),
+            "degrees; pitch: 5 (down) .. 60 (up) degrees. If the user asks to remember an "
+            "appliance's position, pass device=<id> to save this angle as that device's pan "
+            "preset. Face tracking resumes automatically after 2 seconds.",
+            PropertyList({Property("yaw", kPropertyTypeInteger, 0, -45, 45),
+                          Property("pitch", kPropertyTypeInteger, 30, 5, 60),
+                          Property("device", kPropertyTypeString, std::string(""))}),
             [this](const PropertyList& props) -> ReturnValue {
                 if (!servo_ok_) {
                     return std::string("servo not available");
                 }
                 int yaw = props["yaw"].value<int>();
                 int pitch = props["pitch"].value<int>();
+                std::string device = props["device"].value<std::string>();
+                if (!device.empty()) {
+                    if (!ir_service_.SetDevicePan(device, yaw, pitch)) {
+                        return std::string("device not found: ") + device +
+                               " (请先学习该设备)";
+                    }
+                }
                 face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
                 servo_.MoveTo(yaw, pitch, 400);
                 SchedulePanRestore();

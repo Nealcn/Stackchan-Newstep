@@ -58,6 +58,10 @@ public:
     std::vector<DeviceInfo> ListDevices() const;
     bool GetKey(const std::string& device_id, const std::string& key, IrCode* out) const;
 
+    // DAT-2：设备云台方位预设（语音联动「先转向家电方位再发码」）
+    bool SetDevicePan(const std::string& device_id, int yaw, int pitch);
+    bool GetDevicePan(const std::string& device_id, int* yaw, int* pitch) const;
+
 private:
     void SetState(IrState state, const std::string& detail);
     bool LearnTimeoutReached() const;
