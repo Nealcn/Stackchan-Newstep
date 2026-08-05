@@ -37,9 +37,14 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
+            "ir/ir_driver.cc"
+            "ir/ir_codec.cc"
+            "ir/ir_codec_nec.cc"
+            "ir/ir_store.cc"
+            "ir/ir_service.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "ir")
 
 # Add board common files
 list(APPEND SOURCES
@@ -1003,6 +1008,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_spi
                         esp_driver_i2c
                         esp_driver_i2s
+                        esp_driver_rmt
                         esp_driver_jpeg
                         esp_driver_ppa
                         esp_app_format
