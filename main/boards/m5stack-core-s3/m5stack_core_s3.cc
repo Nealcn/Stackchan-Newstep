@@ -1368,6 +1368,7 @@ private:
     stackchan_ir::IrStore ir_store_;
     stackchan_ir::IrService ir_service_;
     esp_timer_handle_t pan_restore_timer_ = nullptr;  // RS-4：联动转向后恢复人脸跟随
+    esp_timer_handle_t led_flash_timer_ = nullptr;    // FR-08：LED 反馈闪烁定时器
     IrRemoteScreen ir_remote_screen_;
     bool remote_screen_open_ = false;  // 遥控屏打开标志（触控语义让渡，RS-3）
 
@@ -1805,6 +1806,12 @@ private:
                 RestoreFaceTracker();
             }
         });
+        // FR-08：红外状态 → LED/表情/舵机反馈（经主线程 Schedule 执行，避免锁冲突）
+        ir_service_.SetStateListener([this](stackchan_ir::IrState state, const std::string& detail) {
+            Application::GetInstance().Schedule([this, state, detail]() {
+                HandleIrState(state, detail);
+            });
+        });
         RegisterIrMcpTools();
         ESP_LOGI(TAG, "IR service ready (tx=GPIO%d rx=GPIO%d)",
                  STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
@@ -1885,6 +1892,79 @@ private:
                 SchedulePanRestore();
                 return true;
             });
+    }
+
+    // ---- FR-08：红外状态反馈（LED 闪烁 / 舵机点头 / 通知）----
+    // 仅在主线程（Application::Schedule）调用，display 操作可安全取锁
+    void HandleIrState(stackchan_ir::IrState state, const std::string& detail) {
+        if (state == stackchan_ir::IrState::kLearning) {
+            SetLedManual(Rgb888To565(30, 90, 200));  // 学习：蓝色常亮
+        } else if (state == stackchan_ir::IrState::kError) {
+            FlashLed(Rgb888To565(220, 30, 30));      // 失败：红色闪烁
+            if (display_ != nullptr) {
+                display_->ShowNotification(detail.c_str(), 2000);
+            }
+        } else if (state == stackchan_ir::IrState::kCaptured) {
+            FlashLed(Rgb888To565(0, 200, 80));       // 捕获成功：绿色
+        } else if (state == stackchan_ir::IrState::kIdle) {
+            if (detail.rfind("emitted", 0) == 0) {
+                FlashLed(Rgb888To565(0, 200, 80));   // 发射成功：绿色
+                if (servo_ok_) servo_.Nod();          // 物理点头反馈
+            } else if (detail.rfind("已保存", 0) == 0) {
+                FlashLed(Rgb888To565(0, 200, 80));   // 学习保存：绿色
+            } else {
+                RestoreStateLed();                   // 取消/超时：恢复状态灯
+            }
+        }
+    }
+
+    // 手动点亮整圈 LED（12 颗同色），进入手动模式
+    void SetLedManual(uint16_t rgb565) {
+        if (!py32_dev_) return;
+        led_manual_ = true;
+        uint16_t colors[12];
+        for (int i = 0; i < 12; i++) colors[i] = rgb565;
+        Py32SetLedFrame(colors, 12);
+    }
+
+    // 闪烁反馈：点亮 → 500ms 后恢复状态灯（定时器可复用）
+    void FlashLed(uint16_t rgb565) {
+        SetLedManual(rgb565);
+        if (led_flash_timer_ == nullptr) {
+            esp_timer_create_args_t args = {};
+            args.callback = [](void* arg) {
+                auto* self = static_cast<M5StackCoreS3Board*>(arg);
+                self->RestoreStateLed();
+            };
+            args.arg = this;
+            args.dispatch_method = ESP_TIMER_TASK;
+            args.name = "led_flash";
+            esp_timer_create(&args, &led_flash_timer_);
+        } else {
+            esp_timer_stop(led_flash_timer_);
+        }
+        esp_timer_start_once(led_flash_timer_, 500 * 1000);
+    }
+
+    // 恢复状态灯：Speaking 橙 / Listening 绿 / 其余灭（与 SetLedUpdater 逻辑一致）
+    void RestoreStateLed() {
+        if (!py32_dev_) return;
+        led_manual_ = false;  // 反馈结束，恢复自动模式
+        auto state = Application::GetInstance().GetDeviceState();
+        uint16_t color = 0;
+        if (state == kDeviceStateSpeaking) {
+            color = Rgb888To565(255, 120, 0);
+        } else if (state == kDeviceStateListening) {
+            color = Rgb888To565(0, 255, 0);
+        }
+        if (color != 0) {
+            uint16_t colors[12];
+            for (int i = 0; i < 12; i++) colors[i] = color;
+            Py32SetLedFrame(colors, 12);
+        } else {
+            uint16_t off[12] = {};
+            Py32SetLedFrame(off, 12);
+        }
     }
 
     // 遥控屏初始化：LVGL 输入设备读取 FT6336；打开时让渡手势语义（RS-3）
