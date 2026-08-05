@@ -5,15 +5,17 @@
 #include "driver/gpio.h"
 
 // ---------------------------------------------------------------------------
-// ⚠️ TC-8：红外 GPIO 引脚待确认
-// 需按 StackChan-BSP / K151 原理图填写实际引脚。当前默认 GPIO_NUM_NC(-1)，
-// 未配置时驱动 Init 会返回失败并打印明确日志，不会误用其他引脚。
+// 红外 GPIO 引脚（TC-8 已闭环，2026-08-05）
+// 来源：M5Stack 官方 StackChan(K151) 文档引脚表 —— G5=IR_SEND, G10=IR_REC
+// 交叉验证：同表 Servo_TX=G6/Servo_RX=G7 与板代码 UART1 GPIO6/7 一致；
+//          I2C SDA=G12/SCL=G11 与 config.h 一致。
+// 若验证机冒烟发现收发异常，优先复核这两处（见验证文档 §3.2 用例 4/5）。
 // ---------------------------------------------------------------------------
 #ifndef STACKCHAN_IR_TX_GPIO
-#define STACKCHAN_IR_TX_GPIO GPIO_NUM_NC  // TODO(TC-8): 填写红外发射引脚
+#define STACKCHAN_IR_TX_GPIO GPIO_NUM_5   // IR_SEND
 #endif
 #ifndef STACKCHAN_IR_RX_GPIO
-#define STACKCHAN_IR_RX_GPIO GPIO_NUM_NC  // TODO(TC-8): 填写红外接收引脚
+#define STACKCHAN_IR_RX_GPIO GPIO_NUM_10  // IR_REC
 #endif
 
 // 载波（绝大多数家电为 38kHz）
