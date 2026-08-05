@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <queue>
 #include <mbedtls/base64.h>
 
 #include <cJSON.h>
@@ -212,6 +213,7 @@ private:
     PropertyList properties_;
     std::function<ReturnValue(const PropertyList&)> callback_;
     bool user_only_ = false;
+    bool async_ = false;  // 异步工具:回调返回 kAsyncMarker 后由外部稍后回复
 
 public:
     McpTool(const std::string& name, 
@@ -224,6 +226,8 @@ public:
         callback_(callback) {}
 
     void set_user_only(bool user_only) { user_only_ = user_only; }
+    void set_async(bool async) { async_ = async; }
+    inline bool async() const { return async_; }
     inline const std::string& name() const { return name_; }
     inline const std::string& description() const { return description_; }
     inline const PropertyList& properties() const { return properties_; }
@@ -318,10 +322,18 @@ public:
         return instance;
     }
 
+    // 异步工具约定:回调返回此标记表示"已异步启动,稍后调用 ReplyAsyncResult 回复"
+    static constexpr const char* kAsyncMarker = "__async__";
+
+    // 回复最近一个挂起的异步工具调用(队首);无挂起调用时忽略并返回 false
+    bool ReplyAsyncResult(const std::string& result);
+    bool HasPendingAsync() const { return !pending_async_.empty(); }
+
     void AddCommonTools();
     void AddUserOnlyTools();
     void AddTool(McpTool* tool);
-    void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    // 返回创建的 McpTool*（可为空:重名时跳过），调用方可 set_async(true) 标记异步工具
+    McpTool* AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
@@ -339,6 +351,7 @@ private:
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
 
     std::vector<McpTool*> tools_;
+    std::queue<int> pending_async_;  // 挂起的异步工具调用 id(FIFO)
 };
 
 #endif // MCP_SERVER_H

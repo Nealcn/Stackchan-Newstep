@@ -41,6 +41,9 @@ public:
     std::vector<DeviceInfo> ListDevices() const;
     size_t DeviceCount() const { return devices_.size(); }
 
+    // 生成不冲突的设备 id(dev1/dev2/…,扫描已存在 id,删除后不会复用冲突)
+    std::string GenerateDeviceId() const;
+
     // JSON 导入导出（导入成功覆盖全库并保存；导出用于备份/迁移）
     bool ImportFromJson(const std::string& json);
     std::string ExportToJson() const;

@@ -51,7 +51,8 @@ bool IrService::Emit(const std::string& device_id, const std::string& key, std::
             break;
         }
         IrCode code;
-        if (!store_->GetKey(device_id, key, &code)) {
+        std::string resolved = ResolveDeviceId(device_id);  // 支持设备名(如"空调")匹配
+        if (!store_->GetKey(resolved, key, &code)) {
             reason = "未找到按键码: " + device_id + "." + key +
                      "（可提示用户先学习遥控器）";
             break;
@@ -115,6 +116,7 @@ IrState IrService::LearnPoll(IrCode* out) {
             auto code = IrCodecRegistry::Instance().Decode(sig);
             if (code.has_value() && !code->repeat) {
                 if (out != nullptr) *out = *code;
+                captured_code_ = *code;  // 供语音学习等外部在 kCaptured 状态取码
                 SetState(IrState::kCaptured, code->protocol + " " + std::to_string(code->bits) + "bit");
                 result = IrState::kCaptured;
             } else if (code.has_value() && code->repeat) {
@@ -174,6 +176,42 @@ bool IrService::SaveLearnedKey(const std::string& device_id, const std::string& 
 std::vector<DeviceInfo> IrService::ListDevices() const {
     if (store_ == nullptr) return {};
     return store_->ListDevices();
+}
+
+bool IrService::RemoveDevice(const std::string& device) {
+    if (mutex_ == nullptr || store_ == nullptr) return false;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    bool ok = store_->RemoveDevice(ResolveDeviceId(device));
+    xSemaphoreGive(mutex_);
+    if (ok) ESP_LOGI(kTag, "device removed: %s", device.c_str());
+    return ok;
+}
+
+bool IrService::RemoveKey(const std::string& device, const std::string& key) {
+    if (mutex_ == nullptr || store_ == nullptr) return false;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    bool ok = store_->RemoveKey(ResolveDeviceId(device), key);
+    xSemaphoreGive(mutex_);
+    if (ok) ESP_LOGI(kTag, "key removed: %s.%s", device.c_str(), key.c_str());
+    return ok;
+}
+
+std::string IrService::GenerateDeviceId() const {
+    if (store_ == nullptr) return "dev1";
+    return store_->GenerateDeviceId();
+}
+
+IrCode IrService::LearnCapturedCode() const {
+    return captured_code_;
+}
+
+std::string IrService::ResolveDeviceId(const std::string& name) const {
+    if (store_ == nullptr) return name;
+    if (store_->FindDevice(name) != nullptr) return name;  // id 精确匹配
+    for (const auto& dev : store_->ListDevices()) {
+        if (dev.name == name || dev.type == name) return dev.id;  // 按显示名/类型匹配
+    }
+    return name;  // 未找到:原样返回,保存路径自动创建
 }
 
 bool IrService::SetDevicePan(const std::string& device_id, int yaw, int pitch) {

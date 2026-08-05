@@ -308,8 +308,10 @@ void McpServer::AddTool(McpTool* tool) {
     tools_.push_back(tool);
 }
 
-void McpServer::AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback) {
-    AddTool(new McpTool(name, description, properties, callback));
+McpTool* McpServer::AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback) {
+    auto tool = new McpTool(name, description, properties, callback);
+    AddTool(tool);
+    return tool;
 }
 
 void McpServer::AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback) {
@@ -551,10 +553,27 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {
-            ReplyResult(id, (*tool_iter)->Call(arguments));
+            std::string result = (*tool_iter)->Call(arguments);
+            // 异步工具:回调返回 kAsyncMarker 表示已异步启动,挂起本调用稍后由外部回复
+            if ((*tool_iter)->async() && result.find(McpServer::kAsyncMarker) != std::string::npos) {
+                pending_async_.push(id);
+                return;
+            }
+            ReplyResult(id, result);
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "tools/call: %s", e.what());
             ReplyError(id, e.what());
         }
     });
+}
+
+bool McpServer::ReplyAsyncResult(const std::string& result) {
+    if (pending_async_.empty()) {
+        ESP_LOGW(TAG, "ReplyAsyncResult: no pending async tool call");
+        return false;
+    }
+    int id = pending_async_.front();
+    pending_async_.pop();
+    ReplyResult(id, result);
+    return true;
 }

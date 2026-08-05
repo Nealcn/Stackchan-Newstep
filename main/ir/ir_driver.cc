@@ -71,7 +71,7 @@ esp_err_t IrDriver::Init(int tx_gpio, int rx_gpio) {
 
     // ---- TX 通道 ----
     rmt_tx_channel_config_t tx_cfg = {
-        .gpio_num = tx_gpio,
+        .gpio_num = static_cast<gpio_num_t>(tx_gpio),
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = STACKCHAN_IR_TX_RESOLUTION_HZ,
         .mem_block_symbols = kTxMemBlockSymbols,
@@ -112,7 +112,7 @@ esp_err_t IrDriver::Init(int tx_gpio, int rx_gpio) {
 
     // ---- RX 通道 ----
     rmt_rx_channel_config_t rx_cfg = {
-        .gpio_num = rx_gpio,
+        .gpio_num = static_cast<gpio_num_t>(rx_gpio),
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = STACKCHAN_IR_RX_RESOLUTION_HZ,
         .mem_block_symbols = kRxMemBlockSymbols,
@@ -162,10 +162,10 @@ bool IrDriver::Transmit(const RawSignal& sig) {
     if (syms.empty()) return false;
 
     rmt_transmit_config_t tx_cfg = {
-        .loop_count = 0,                  // 单次发送
-        .eot_level = RMT_IDLE_LEVEL_LOW,  // 发送结束输出低电平（无载波）
-        .queue_nonblocking = false,
-        .flags = {0},
+        .loop_count = 0,  // 单次发送
+        // 发送结束输出低电平（无载波）;ESP-IDF 5.3+ 移除了 RMT_IDLE_LEVEL 枚举,
+        // eot_level 收敛为 flags 位域: 0=低电平, 1=高电平
+        .flags = {.eot_level = 0, .queue_nonblocking = false},
     };
     esp_err_t err = rmt_transmit(tx_, copy_enc_, syms.data(), syms.size() * sizeof(rmt_symbol_word_t),
                                  &tx_cfg);
@@ -220,7 +220,7 @@ void IrDriver::CancelCapture() {
     rx_cancel_.store(true);
 }
 
-bool IrDriver::OnRxDone(rmt_rx_channel_handle_t ch, const rmt_rx_done_event_data_t* data,
+bool IrDriver::OnRxDone(rmt_channel_handle_t ch, const rmt_rx_done_event_data_t* data,
                         void* ctx) {
     auto* self = static_cast<IrDriver*>(ctx);
     (void)ch;

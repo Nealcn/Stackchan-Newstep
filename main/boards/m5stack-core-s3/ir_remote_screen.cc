@@ -10,15 +10,16 @@
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 
-namespace {
-
-const char* kTag = "IR.Screen";
-
 // 按钮回调载荷（动态分配，重建视图时统一释放）
+// 定义在全局作用域以匹配 ir_remote_screen.h 的前向声明（放匿名命名空间会与头文件声明歧义）
 struct BtnData {
     IrRemoteScreen* self;
     std::string payload;  // "back"/"learnbtn"/"newdev"/"open:<id>"/"emit:<key>"/"learn:<key>"
 };
+
+namespace {
+
+const char* kTag = "IR.Screen";
 
 // 预设按键（显示名 → 存储键名）；MCP self.ir.send 的 key 使用英文存储名
 const struct {
@@ -122,7 +123,7 @@ void IrRemoteScreen::RefreshInternal() {
 // ---- 视图构建 ----
 
 void IrRemoteScreen::BuildUi() {
-    screen_ = lv_screen_create();
+    screen_ = lv_obj_create(NULL);  // LVGL 9: 屏幕即 NULL 父对象的根容器（lv_screen_create 不存在）
     lv_obj_set_style_bg_color(screen_, kBgColor, 0);
     lv_obj_set_style_text_font(screen_, &BUILTIN_TEXT_FONT, 0);
 
@@ -217,6 +218,8 @@ lv_obj_t* IrRemoteScreen::CreateButton(lv_obj_t* parent, lv_coord_t w, lv_coord_
     lv_obj_set_style_text_color(label, kTextColor, 0);
     content_btns_.push_back(new BtnData{this, payload});
     lv_obj_add_event_cb(btn, OnButtonClicked, LV_EVENT_CLICKED, content_btns_.back());
+    // 长按：绿色按键=重新学习覆盖；设备列表条目=删除整套
+    lv_obj_add_event_cb(btn, OnButtonClicked, LV_EVENT_LONG_PRESSED, content_btns_.back());
     return btn;
 }
 
@@ -301,6 +304,11 @@ void IrRemoteScreen::ShowKeyMatrix(const std::string& device_id) {
 
 void IrRemoteScreen::StartLearn(const std::string& key_name) {
     if (ir_ == nullptr || !learning_key_.empty()) return;
+    // 已在学习中：重复点击给友好提示，而非误报"模块不可用"
+    if (ir_->state() == stackchan_ir::IrState::kLearning) {
+        SetStatus("学习中：请对准遥控器按按键…");
+        return;
+    }
     if (!ir_->LearnStart(0)) {  // 0 = 服务默认超时（10s）
         SetStatus("学习启动失败（红外模块不可用）");
         return;
@@ -325,12 +333,10 @@ void IrRemoteScreen::OnLearnTick() {
     auto state = ir_->LearnPoll(&code);
     if (state == stackchan_ir::IrState::kCaptured) {
         lv_timer_pause(learn_timer_);
-        // 设备为空 = 新设备：自动创建 dev<N>
+        // 设备为空 = 新设备：自动创建不冲突的 dev<N>（删除设备后不会复用旧编号）
         std::string dev_id = current_device_;
         if (dev_id.empty()) {
-            char buf[16];
-            snprintf(buf, sizeof(buf), "dev%d", (int)ir_->ListDevices().size() + 1);
-            dev_id = buf;
+            dev_id = ir_->GenerateDeviceId();
         }
         std::string key = learning_key_;
         learning_key_.clear();
@@ -354,6 +360,25 @@ void IrRemoteScreen::OnButtonClicked(lv_event_t* e) {
     if (data == nullptr || data->self == nullptr) return;
     IrRemoteScreen* self = data->self;
     const std::string& p = data->payload;
+    const bool long_press = lv_event_get_code(e) == LV_EVENT_LONG_PRESSED;
+
+    if (long_press) {
+        if (p.rfind("emit:", 0) == 0) {
+            // 长按已学按键 → 重新学习覆盖旧码
+            self->SetStatus("重新学习：" + std::string(KeyDisplayName(p.substr(5))) +
+                            "…请对准遥控器按按键");
+            self->StartLearn(p.substr(5));
+            return;
+        }
+        if (p.rfind("open:", 0) == 0) {
+            // 长按设备条目 → 删除整套（确认用状态栏提示）
+            std::string dev_id = p.substr(5);
+            bool ok = self->ir_ != nullptr && self->ir_->RemoveDevice(dev_id);
+            self->SetStatus(ok ? ("已删除设备 " + dev_id) : "删除失败");
+            self->ShowDeviceList();
+            return;
+        }
+    }
 
     if (p == "back") {
         if (self->current_device_.empty()) {

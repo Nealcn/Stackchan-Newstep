@@ -129,6 +129,12 @@ std::vector<DeviceInfo> IrStore::ListDevices() const {
     return out;
 }
 
+std::string IrStore::GenerateDeviceId() const {
+    int n = 1;
+    while (devices_.count("dev" + std::to_string(n))) n++;
+    return "dev" + std::to_string(n);
+}
+
 bool IrStore::ParseJson(const std::string& json) {
     cJSON* root = cJSON_Parse(json.c_str());
     if (root == nullptr) {

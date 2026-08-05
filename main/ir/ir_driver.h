@@ -47,7 +47,7 @@ public:
 private:
     void Deinit();  // 释放全部通道/编码器/信号量并置空（幂等）
 
-    static bool OnRxDone(rmt_rx_channel_handle_t ch,
+    static bool OnRxDone(rmt_channel_handle_t ch,
                          const rmt_rx_done_event_data_t* data, void* ctx);
 
     // 将 RawSignal 转成 RMT 符号序列（1 符号 = 1 段 on + 1 段 off）
@@ -55,8 +55,8 @@ private:
     // 将 RMT 符号序列归一化为 RawSignal（处理极性、前导空闲、相邻同段合并）
     static RawSignal NormalizeSymbols(const rmt_symbol_word_t* syms, size_t count);
 
-    rmt_tx_channel_handle_t tx_ = nullptr;
-    rmt_rx_channel_handle_t rx_ = nullptr;
+    rmt_channel_handle_t tx_ = nullptr;
+    rmt_channel_handle_t rx_ = nullptr;
     rmt_encoder_handle_t copy_enc_ = nullptr;
 
     // RX 捕获状态（ISR 与任务之间通过信号量+原子标志通信）

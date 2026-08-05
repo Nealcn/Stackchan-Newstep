@@ -54,9 +54,20 @@ public:
                         const std::string& device_name, const std::string& key,
                         const IrCode& code);
 
+    // 删除设备（整套按键）或单个按键（支持设备名解析）
+    bool RemoveDevice(const std::string& device);
+    bool RemoveKey(const std::string& device, const std::string& key);
+
     // 设备/码库查询（供 MCP 工具描述与遥控屏渲染）
     std::vector<DeviceInfo> ListDevices() const;
     bool GetKey(const std::string& device_id, const std::string& key, IrCode* out) const;
+    // 生成不冲突的设备 id（转发 IrStore，屏内/语音学习共用）
+    std::string GenerateDeviceId() const;
+    // 设备解析:先按 id 精确匹配,再按 name 匹配(语音学习用设备名,老数据 id=name)
+    // 找不到时返回原名(保存路径会自动创建)
+    std::string ResolveDeviceId(const std::string& name) const;
+    // 最近一次捕获的码（kCaptured 状态有效；供语音学习保存/回复）
+    IrCode LearnCapturedCode() const;
 
     // DAT-2：设备云台方位预设（语音联动「先转向家电方位再发码」）
     bool SetDevicePan(const std::string& device_id, int yaw, int pitch);
@@ -75,6 +86,7 @@ private:
     IrState state_ = IrState::kIdle;
     std::string detail_;
     int64_t learn_deadline_us_ = 0;
+    IrCode captured_code_;  // LearnPoll 捕获成功时记录（kCaptured 状态有效）
 };
 
 }  // namespace stackchan_ir

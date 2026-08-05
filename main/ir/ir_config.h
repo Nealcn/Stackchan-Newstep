@@ -34,11 +34,13 @@
 #define STACKCHAN_IR_RX_RESOLUTION_HZ 1000000
 #endif
 
-// RX 信号范围（纳秒）：min 过滤毛刺(<100us)，max 兼作空闲结束判定(>12ms 停止接收)
-// 约束：resolution(1MHz) * max_ns / 1e9 <= 32767 (ESP32-S3) → max_ns <= 32.7ms
-// NEC AGC on=9000us < 12000us，满足
+// RX 信号范围（纳秒）：min 过滤毛刺，max 兼作空闲结束判定(>12ms 停止接收)
+// 约束①：filter 时钟为 RMT group 时钟(80MHz APB)，filter = 80MHz*min_ns/1e9 <= 255
+//        → min_ns <= 3187ns（原 100us 会算出 8000，rmt_receive 直接报 ESP_ERR_INVALID_ARG）
+// 约束②：resolution(1MHz) * max_ns / 1e9 <= 32767 (ESP32-S3) → max_ns <= 32.7ms
+// NEC 最短脉冲 562us，2us 毛刺过滤绰绰有余；NEC AGC on=9000us < 12000us，满足
 #ifndef STACKCHAN_IR_RX_MIN_NS
-#define STACKCHAN_IR_RX_MIN_NS 100000
+#define STACKCHAN_IR_RX_MIN_NS 2000
 #endif
 #ifndef STACKCHAN_IR_RX_MAX_NS
 #define STACKCHAN_IR_RX_MAX_NS 12000000
