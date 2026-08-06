@@ -1817,6 +1817,7 @@ private:
             });
         });
         RegisterIrMcpTools();
+        RegisterActionMcpTools();
         ESP_LOGI(TAG, "IR service ready (tx=GPIO%d rx=GPIO%d)",
                  STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
     }
@@ -2131,6 +2132,82 @@ private:
             },
             [this](bool open) { remote_screen_open_ = open; });
         ESP_LOGI(TAG, "IR remote screen ready (双指触摸打开)");
+    }
+
+    // ---- 动作/表情 MCP 工具（源自 stackchan-mcp 引入评估）----
+    // 板级能力全部现成（Nod/Shake/Center/SetEmotion），仅需暴露给 LLM
+    void RegisterActionMcpTools() {
+        auto& mcp = McpServer::GetInstance();
+
+        // self.servo.nod —— 点头
+        mcp.AddTool("self.servo.nod",
+                    "Nod the head once. Use for greetings, agreement, thanks, or positive "
+                    "reactions.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        if (!servo_ok_) return std::string("servo not available");
+                        servo_.Nod();
+                        return true;
+                    });
+
+        // self.servo.shake —— 摇头
+        mcp.AddTool("self.servo.shake",
+                    "Shake the head. Use for negation, refusal, disagreement, or when "
+                    "something is unavailable.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        if (!servo_ok_) return std::string("servo not available");
+                        servo_.Shake();
+                        return true;
+                    });
+
+        // self.servo.home —— 云台归位（复用 RS-4 恢复逻辑）
+        mcp.AddTool("self.servo.home",
+                    "Return the pan-tilt head to the center position (yaw 0, pitch 30). "
+                    "Face tracking resumes automatically after 2 seconds.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        if (!servo_ok_) return std::string("servo not available");
+                        face_tracker_.Pause(false);  // 暂停跟随，让位归位
+                        servo_.Center();
+                        SchedulePanRestore();
+                        return true;
+                    });
+
+        // self.face.set_emotion —— 指定表情（SetEmotion 内部联动舵机动画 + 情绪灯）
+        mcp.AddTool(
+            "self.face.set_emotion",
+            "Set the avatar facial expression. Valid values: happy, sad, angry, loving, "
+            "thinking, winking, cool, relaxed, sleepy, surprised, laughing, funny, confused, "
+            "delicious, confident, embarrassed, silly, kissy, crying, shocked, neutral. "
+            "Also triggers a matching head animation and LED ring color.",
+            PropertyList({Property("emotion", kPropertyTypeString)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                std::string emotion = props["emotion"].value<std::string>();
+                static const char* kValid[] = {
+                    "happy", "sad", "angry", "loving", "thinking", "winking", "cool",
+                    "relaxed", "sleepy", "surprised", "laughing", "funny", "confused",
+                    "delicious", "confident", "embarrassed", "silly", "kissy", "crying",
+                    "shocked", "neutral",
+                };
+                bool valid = false;
+                for (const char* v : kValid) {
+                    if (emotion == v) {
+                        valid = true;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    return std::string("invalid emotion: ") + emotion +
+                           " (valid: happy, sad, angry, loving, thinking, winking, cool, "
+                           "relaxed, sleepy, surprised, laughing, funny, confused, delicious, "
+                           "confident, embarrassed, silly, kissy, crying, shocked, neutral)";
+                }
+                if (display_ != nullptr) {
+                    display_->SetEmotion(emotion.c_str());
+                }
+                return true;
+            });
     }
 
     // RS-4：联动转向 2s 后恢复人脸跟随（定时器可复用，重复调用先停旧）
