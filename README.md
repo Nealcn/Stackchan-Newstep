@@ -21,6 +21,12 @@
 - **硬件细节**：发码期间自动暂停摄像头采集（防电磁干扰，RS-1）；红外引脚 G5(IR_SEND)/G10(IR_REC)
 - **逻辑测试**：NEC 编解码主机端镜像测试 38/38（`tools/nec_codec_test.py`，含重复帧/抖动/边界）
 
+### SD 卡与拍照存卡（本项目新增 ⭐）
+
+- **TF 卡（microSD）**：CoreS3 原生卡槽（下巴位置），SPI 模式，挂载 `/sdcard`（20MHz 起步，失败自动降速重试；**挂载失败不阻塞开机**）
+- **拍照存卡**：语音「**拍张照存到卡里**」→ 拍照 → JPEG 编码（硬件加速）→ 存 `/sdcard/photos/`（时间戳命名，可指定文件名）→ 语音回传保存路径；取出 TF 卡即可在电脑查看
+- **技术说明**：TF 与 LCD 共用 SPI3 总线，GPIO35 为 LCD-DC/SD-MISO 复用引脚（espressif BSP 已知限制「SD 与 LCD 不能同时工作」）——本项目通过**操作期间切引脚方向 + 暂停 LCD 刷新**解决，写卡窗口约 100-200ms（屏幕短暂定格属正常）
+
 ### 头顶触摸 (SI12T)
 
 - 3区电容触摸，摸头触发对话
@@ -182,6 +188,9 @@ main/
 │   ├── ir_codec.* + ir_codec_nec.* # 协议编解码与注册表
 │   ├── ir_store.*                 # NVS 码库持久化 + JSON 导入导出
 │   └── ir_service.*               # 学习/发射编排 + RS-1 摄像头暂停挂钩
+├── sd/                            # ★ SD 卡模块
+│   ├── sd_card.*                  # TF 挂载/文件读写（GPIO35 方向守卫 + LVGL 暂停）
+│   └── sd_photo.*                 # 拍照存卡（image_to_jpeg 复用）
 └── boards/m5stack-core-s3/
     ├── ir_remote_screen.*         # ★ LVGL 红外遥控屏（双指打开）
     └── m5stack_core_s3.cc         # 板级集成：MCP 工具/反馈/手势让渡

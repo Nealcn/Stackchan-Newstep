@@ -42,9 +42,11 @@ set(SOURCES "audio/audio_codec.cc"
             "ir/ir_codec_nec.cc"
             "ir/ir_store.cc"
             "ir/ir_service.cc"
+            "sd/sd_card.cc"
+            "sd/sd_photo.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "ir")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "ir" "sd")
 
 # Add board common files
 list(APPEND SOURCES
@@ -1019,6 +1021,8 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        sdmmc
+                        esp_driver_sdmmc
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
