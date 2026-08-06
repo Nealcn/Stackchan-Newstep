@@ -252,7 +252,9 @@ void SdCard::SelfTest() {
     for (int i = 0; i < kSelfTestSize; i++) wbuf[i] = (uint8_t)(esp_random() & 0xFF);
 
     std::string path;
-    if (!WriteFile(wbuf, sizeof(wbuf), ".selftest", "", &path)) {
+    // 注意: fatfs 把 '.' 当主名/扩展名分隔符, ".selftest" 会被解析为空主名
+    // → FR_INVALID_NAME(EINVAL), 自检目录用普通名字
+    if (!WriteFile(wbuf, sizeof(wbuf), "selftest", "", &path)) {
         ESP_LOGW(kTag, "SelfTest: write failed");
         return;
     }
