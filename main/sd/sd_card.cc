@@ -1,7 +1,7 @@
 // microSD(TF) 卡驱动实现（SPI 模式，与 LCD 共用 SPI3 总线）
 #include "sd_card.h"
 
-#include <sys/dirent.h>
+#include <dirent.h>           // opendir/readdir/closedir（工具链 dirent.h，非 sys/dirent.h）
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -16,8 +16,9 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_vfs_fat.h"
-#include "sdmmc/sdmmc_card.h"
-#include "sdmmc/sdspi_host.h"
+#include "sd_protocol_types.h"   // sdmmc_card_t（ESP-IDF 5.5：sdmmc_card.h 已移除）
+#include "sdmmc_cmd.h"           // sdmmc_card_print_info
+#include "driver/sdspi_host.h"   // SDSPI_HOST_DEFAULT / sdmmc_slot_config_t（esp_driver_sdspi）
 
 namespace stackchan_sd {
 
@@ -75,8 +76,8 @@ esp_err_t SdCard::Init() {
 }
 
 bool SdCard::MountAttempt(int max_freq_khz) {
-    // SDSPI_DEFAULT_HOST 默认 slot=SPI2_HOST，必须覆盖为 SPI3_HOST（与 LCD 同总线）
-    sdmmc_host_t host = SDSPI_DEFAULT_HOST;
+    // SDSPI_HOST_DEFAULT() 默认 slot=SPI2_HOST，必须覆盖为 SPI3_HOST（与 LCD 同总线）
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI3_HOST;
     host.max_freq_khz = max_freq_khz;
 
@@ -112,7 +113,7 @@ std::string SdCard::MakeFilename(const char* ext) {
                  tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, ext);
         return buf;
     }
-    static uint32_t counter = 0;
+    static unsigned int counter = 0;  // 32 位平台与 %u 匹配（uint32_t=long unsigned 会被 -Werror=format 拦截）
     while (true) {
         char buf[32];
         snprintf(buf, sizeof(buf), "photo_%03u%s", counter++, ext);

@@ -14,7 +14,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "sdmmc/sdmmc_card.h"
+#include "sd_protocol_types.h"   // sdmmc_card_t（ESP-IDF 5.5：sdmmc_card.h 已移除）
 
 namespace stackchan_sd {
 

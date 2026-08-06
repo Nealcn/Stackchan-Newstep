@@ -1023,6 +1023,7 @@ idf_component_register(SRCS ${SOURCES}
                         fatfs
                         sdmmc
                         esp_driver_sdmmc
+                        esp_driver_sdspi
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
