@@ -33,6 +33,7 @@ protected:
     lv_obj_t* emoji_box_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
     esp_timer_handle_t preview_timer_ = nullptr;
+    esp_timer_handle_t subtitle_timer_ = nullptr;  // 字幕自动消失定时器（停止更新 8s 后清空）
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 

@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <functional>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -144,6 +145,7 @@ private:
 
     bool has_server_time_ = false;
     bool aborted_ = false;
+    std::atomic<bool> tts_start_pending_{false};  // tts start 与音频帧的竞态放行窗口（A2）
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;

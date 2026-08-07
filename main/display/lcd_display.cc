@@ -87,6 +87,26 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
         .skip_unhandled_events = false,
     };
     esp_timer_create(&preview_timer_args, &preview_timer_);
+
+    // 字幕自动消失定时器：停止更新 8s 后清空底栏（仿 notification_timer 模式；
+    // 回调在 esp_timer 任务上下文，需取 DisplayLockGuard 再操作 LVGL）
+    esp_timer_create_args_t subtitle_timer_args = {
+        .callback = [](void* arg) {
+            LcdDisplay* display = static_cast<LcdDisplay*>(arg);
+            DisplayLockGuard lock(display);
+            if (display->chat_message_label_ != nullptr) {
+                lv_label_set_text(display->chat_message_label_, "");
+            }
+            if (display->bottom_bar_ != nullptr) {
+                lv_obj_add_flag(display->bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+            }
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "subtitle_timer",
+        .skip_unhandled_events = false,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&subtitle_timer_args, &subtitle_timer_));
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -1048,9 +1068,15 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
     }
 #endif
+    // 字幕自动消失：消息更新即续期，停止更新 8s 后清空（说话期间持续更新不消失）
+    if (content != nullptr && content[0] != '\0') {
+        esp_timer_stop(subtitle_timer_);
+        esp_timer_start_once(subtitle_timer_, 8 * 1000 * 1000);
+    }
 }
 
 void LcdDisplay::ClearChatMessages() {
+    esp_timer_stop(subtitle_timer_);  // 手动清空时取消自动消失计时
     DisplayLockGuard lock(this);
     // In non-wechat mode, just clear the chat message label and hide the bar
     if (chat_message_label_ != nullptr) {

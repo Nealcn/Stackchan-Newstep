@@ -524,7 +524,11 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        // tts_start_pending_：tts start 经 Schedule 异步生效，先到的音频帧放行
+        // （MQTT 双通道无顺序保证；进 Speaking 时 ResetDecoder 清过期帧防串音）
+        auto state = GetDeviceState();
+        if (state == kDeviceStateSpeaking ||
+            (state == kDeviceStateListening && tts_start_pending_.load())) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -552,11 +556,21 @@ void Application::InitializeProtocol() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                tts_start_pending_.store(true);  // 立即放行先到的音频帧（gate 竞态加固）
                 Schedule([this]() {
                     aborted_ = false;
+                    // 通道未开先开（MQTT 创建 UDP / WS 创建连接），修复「假 Speaking」无声；
+                    // OpenAudioChannel 阻塞 ≤10s，Schedule 内安全
+                    if (protocol_ && !protocol_->IsAudioChannelOpened()) {
+                        if (!protocol_->OpenAudioChannel()) {
+                            ESP_LOGW(TAG, "tts start: audio channel open failed");
+                        }
+                    }
                     SetDeviceState(kDeviceStateSpeaking);
+                    tts_start_pending_.store(false);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                tts_start_pending_.store(false);  // 防悬挂
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
