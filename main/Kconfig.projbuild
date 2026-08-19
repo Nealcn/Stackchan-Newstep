@@ -14,6 +14,30 @@ config OTA_FALLBACK_URL
         This is typically set to the public server so devices can always activate even when
         the user's custom server is unavailable.
 
+config OTA_LAN_URL
+    string "LAN OTA URL"
+    default "http://192.168.0.9:8003/xiaozhi/ota/"
+    help
+        Local network OTA URL, tried after the NVS ota_url and the last successful URL,
+        before OTA_URL / OTA_FALLBACK_URL. Uses a short timeout (OTA_LAN_TIMEOUT_MS) so
+        the device does not stall on an unreachable LAN server when away from home.
+
+config OTA_LAN_TIMEOUT_MS
+    int "LAN OTA request timeout (ms)"
+    default 3000
+    range 500 10000
+    help
+        HTTP request timeout for the LAN OTA node. Keep it short (3~5s) so the device
+        quickly falls through to the public servers when the LAN server is unreachable.
+
+config OTA_SKIP_UPDATE_ON_FALLBACK
+    bool "Skip firmware auto-upgrade on fallback (non-self-hosted) servers"
+    default y
+    help
+        When the OTA check succeeds on a non-self-hosted server (e.g. the official cloud),
+        only use its websocket server address and do NOT trigger firmware download/upgrade.
+        This prevents the official cloud from overwriting the custom firmware.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

@@ -1,8 +1,11 @@
 CONFIG_BOARD_TYPE_M5STACK_CORE_S3=y
 CONFIG_SPIRAM_MODE_QUAD=y
-# OTA 地址不再覆盖：回退官方默认 https://api.tenclass.net/xiaozhi/ota/
-# （设备端可在 NVS ota_url 配置自定义地址，优先级高于编译期默认值）
-#CONFIG_OTA_URL="http://www.nealtea.cn:8003/xiaozhi/ota/"
+# 多服务器 OTA 按序切换：LAN → DDNS(OTA_URL) → 官方云(OTA_FALLBACK_URL,默认)
+# 设备端可在 NVS ota_url 配置自定义地址（优先级最高）
+CONFIG_OTA_LAN_URL="http://192.168.0.9:8003/xiaozhi/ota/"
+CONFIG_OTA_URL="http://www.nealtea.cn:8003/xiaozhi/ota/"
+CONFIG_OTA_SKIP_UPDATE_ON_FALLBACK=y
+CONFIG_OTA_LAN_TIMEOUT_MS=3000
 
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=y

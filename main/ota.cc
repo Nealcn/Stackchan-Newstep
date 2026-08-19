@@ -24,6 +24,21 @@
 
 #define TAG "Ota"
 
+namespace {
+
+// 是否自建服务器（LAN 私网段 / 自有域名）。自建节点允许固件升级，
+// 官方云等外部节点受 OTA_SKIP_UPDATE_ON_FALLBACK 保护，仅做服务器发现。
+bool IsSelfHostedServer(const std::string& url) {
+    if (url.find("192.168.") != std::string::npos) return true;
+    if (url.find("://10.") != std::string::npos) return true;  // 10.x.x.x 私网段
+    if (url.find("127.0.0.1") != std::string::npos) return true;
+    if (url.find("localhost") != std::string::npos) return true;
+    if (url.find("nealtea.cn") != std::string::npos) return true;
+    return false;
+}
+
+}  // namespace
+
 
 Ota::Ota() {
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
@@ -71,8 +86,13 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     return http;
 }
 
-/* 
+/*
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
+ *
+ * 多服务器按序切换（LAN → DDNS → 官方云）：
+ * 候选顺序 = NVS ota_url(手动) → NVS ota_url_last_success(上次成功) →
+ *             OTA_LAN_URL → OTA_URL → OTA_FALLBACK_URL（去重，空/过短跳过）
+ * 任一成功即停止；LAN 用短超时（OTA_LAN_TIMEOUT_MS），其余用公网超时。
  */
 esp_err_t Ota::CheckVersion() {
     auto& board = Board::GetInstance();
@@ -82,28 +102,57 @@ esp_err_t Ota::CheckVersion() {
     current_version_ = app_desc->version;
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
-    std::string url = GetCheckVersionUrl();
-    if (url.length() < 10) {
+    // 构造候选列表（含去重）
+    std::vector<std::string> candidates;
+    Settings nvs("wifi", false);
+    std::string manual_url = nvs.GetString("ota_url");          // 用户手动设置（最高优先）
+    std::string last_ok = nvs.GetString("ota_url_last_success");  // 上次成功节点（可选增强）
+    if (!manual_url.empty()) candidates.push_back(manual_url);
+    if (!last_ok.empty() && last_ok != manual_url) candidates.push_back(last_ok);
+    candidates.push_back(CONFIG_OTA_LAN_URL);
+    candidates.push_back(CONFIG_OTA_URL);
+    candidates.push_back(CONFIG_OTA_FALLBACK_URL);
+
+    std::vector<std::string> urls;
+    for (const auto& u : candidates) {
+        if (u.length() < 10) continue;  // 未配置/过短
+        if (std::find(urls.begin(), urls.end(), u) == urls.end()) urls.push_back(u);
+    }
+    if (urls.empty()) {
         ESP_LOGE(TAG, "Check version URL is not properly set");
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Try the primary URL first, fallback to built-in default on failure
-    int last_error = TryCheckVersion(url);
-    if (last_error != ESP_OK) {
-        const char* fallback_url = CONFIG_OTA_FALLBACK_URL;
-        if (url != fallback_url) {
-            ESP_LOGW(TAG, "Primary OTA URL failed (err=0x%x), trying fallback: %s", last_error, fallback_url);
-            last_error = TryCheckVersion(fallback_url);
+    // 按序尝试，成功即停止
+    int last_error = ESP_FAIL;
+    for (const auto& u : urls) {
+        // LAN 私网节点用短超时，避免设备在外时卡在连 192.168.x 上
+        bool is_lan = u.find("192.168.") != std::string::npos ||
+                      u.find("://10.") != std::string::npos;
+        int timeout_ms = is_lan ? CONFIG_OTA_LAN_TIMEOUT_MS : 10000;
+        ESP_LOGI(TAG, "Trying OTA server (%s, timeout=%dms): %s",
+                 is_lan ? "LAN" : "remote", timeout_ms, u.c_str());
+        last_error = TryCheckVersion(u, timeout_ms);
+        if (last_error == ESP_OK) {
+            active_ota_url_ = u;
+            // 记住本次成功节点：下次启动优先尝试，失败再回退全链
+            if (nvs.GetString("ota_url_last_success") != u) {
+                nvs.SetString("ota_url_last_success", u);
+            }
+            ESP_LOGI(TAG, "OTA server OK: %s", u.c_str());
+            return ESP_OK;
         }
+        ESP_LOGW(TAG, "OTA server failed (err=0x%x), trying next: %s", last_error, u.c_str());
     }
 
+    ESP_LOGE(TAG, "All OTA servers failed");
     return (esp_err_t)last_error;
 }
 
-int Ota::TryCheckVersion(const std::string& url) {
+int Ota::TryCheckVersion(const std::string& url, int timeout_ms) {
     auto& board = Board::GetInstance();
     auto http = SetupHttp();
+    http->SetTimeout(timeout_ms);
 
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
@@ -232,12 +281,12 @@ int Ota::TryCheckVersion(const std::string& url) {
         if (cJSON_IsString(version)) {
             firmware_version_ = version->valuestring;
         }
-        cJSON *url = cJSON_GetObjectItem(firmware, "url");
-        if (cJSON_IsString(url)) {
-            firmware_url_ = url->valuestring;
+        cJSON *fw_url = cJSON_GetObjectItem(firmware, "url");
+        if (cJSON_IsString(fw_url)) {
+            firmware_url_ = fw_url->valuestring;
         }
 
-        if (cJSON_IsString(version) && cJSON_IsString(url)) {
+        if (cJSON_IsString(version) && cJSON_IsString(fw_url)) {
             // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
             has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
             if (has_new_version_) {
@@ -250,6 +299,15 @@ int Ota::TryCheckVersion(const std::string& url) {
             if (cJSON_IsNumber(force) && force->valueint == 1) {
                 has_new_version_ = true;
             }
+#ifdef CONFIG_OTA_SKIP_UPDATE_ON_FALLBACK
+            // 官方云等非自建节点兜底:只使用其 websocket 服务器地址,
+            // 跳过固件自动升级,防止官方固件覆盖自定义固件
+            if (has_new_version_ && !IsSelfHostedServer(url)) {
+                ESP_LOGW(TAG, "Fallback server (%s) offers firmware update, "
+                              "skipping upgrade (OTA_SKIP_UPDATE_ON_FALLBACK)", url.c_str());
+                has_new_version_ = false;
+            }
+#endif
         }
     } else {
         ESP_LOGW(TAG, "No firmware section found!");
@@ -476,7 +534,9 @@ esp_err_t Ota::Activate() {
         return ESP_FAIL;
     }
 
-    std::string url = GetCheckVersionUrl();
+    // 激活请求打到本次 CheckVersion 成功节点（而非编译期默认），
+    // 保证 challenge 与应答服务器一致；未成功过则回退原逻辑
+    std::string url = active_ota_url_.empty() ? GetCheckVersionUrl() : active_ota_url_;
     if (url.back() != '/') {
         url += "/activate";
     } else {

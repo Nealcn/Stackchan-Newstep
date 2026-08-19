@@ -30,11 +30,12 @@ public:
     const std::string& GetActivationMessage() const { return activation_message_; }
     const std::string& GetActivationCode() const { return activation_code_; }
     std::string GetCheckVersionUrl();
-    int TryCheckVersion(const std::string& url);
+    int TryCheckVersion(const std::string& url, int timeout_ms);
 
 private:
     std::string activation_message_;
     std::string activation_code_;
+    std::string active_ota_url_;  // 本次 CheckVersion 成功节点（Activate 用它，避免打到别的服务器）
     bool has_new_version_ = false;
     bool has_mqtt_config_ = false;
     bool has_websocket_config_ = false;
