@@ -95,6 +95,13 @@ std::unique_ptr<Http> Ota::SetupHttp() {
  * 任一成功即停止；LAN 用短超时（OTA_LAN_TIMEOUT_MS），其余用公网超时。
  */
 esp_err_t Ota::CheckVersion() {
+#if !CONFIG_OTA_CHECK_ENABLED
+    // OTA 检查已禁用：不请求任何服务器，复用 NVS 已有的 websocket/mqtt 配置
+    ESP_LOGW(TAG, "OTA check disabled (CONFIG_OTA_CHECK_ENABLED=n), "
+                  "reusing existing server config from NVS");
+    return ESP_OK;
+#endif
+
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
 

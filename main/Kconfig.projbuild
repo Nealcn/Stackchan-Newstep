@@ -1,5 +1,13 @@
 menu "Xiaozhi Assistant"
 
+config OTA_CHECK_ENABLED
+    bool "Enable OTA version check at startup"
+    default y
+    help
+        Set to n to skip the startup OTA check entirely (no HTTP requests to any
+        OTA server). The device will reuse the server (websocket/mqtt) config
+        already stored in NVS. Useful for temporarily disabling OTA.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"
