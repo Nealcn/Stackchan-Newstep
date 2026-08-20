@@ -188,3 +188,30 @@ git diff HEAD -- main/application.cc
 git checkout -- managed_components/78__esp-wifi-connect/wifi_station.cc
 git checkout -- main/application.cc
 ```
+
+---
+
+## 崩溃重启排查参考（乐鑫官方文档，2026-08-20 已验证）
+
+设备经常崩溃重启？优先看这份官方崩溃排查文档，崩溃地址/现象基本都能对上号：
+
+### 核心：严重错误（Fatal Errors）—— Guru Meditation Error / panic / 看门狗 / 栈溢出 / 内存错误 / 掉电复位
+
+- 中文（stable，ESP32-S3）：https://docs.espressif.com/projects/esp-idf/zh_CN/stable/esp32s3/api-guides/fatal-errors.html
+- 英文（stable，ESP32-S3）：https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/fatal-errors.html
+- 其他芯片（C3/S3/C6）：把 URL 里的 `esp32s3` 替换成对应型号
+
+### 配套工具
+
+| 场景 | 文档 | 说明 |
+|---|---|---|
+| 崩溃堆栈自动解码 | [IDF Monitor](https://docs.espressif.com/projects/esp-idf/zh_CN/stable/esp32s3/api-guides/tools/idf-monitor.html) | `idf.py monitor` 把十六进制地址直接翻译成源码文件名+行号，不用手动工具 |
+| 偶现/难复现崩溃 | [Core Dump](https://docs.espressif.com/projects/esp-idf/zh_CN/stable/esp32s3/api-guides/core_dump.html) | 崩溃时把内存/任务快照存 Flash，电脑上离线解析 |
+| 看门狗（任务/中断/RTC） | [Watchdog (WDTS)](https://docs.espressif.com/projects/esp-idf/zh_CN/stable/esp32s3/api-reference/system/wdts.html) | ⚠️ 正确路径是 `api-reference/system/wdts`（旧的 `watchdog` 路径已 404） |
+
+### 芯片勘误表（硬件 bug 导致的异常重启）
+
+- ESP32 勘误表 PDF：https://www.espressif.com/sites/default/files/documentation/esp32_errata_en.pdf
+  - ⚠️ 该站点对部分网络（如国内云服务器）返回 403，浏览器直接访问正常；打不开就用手机/电脑浏览器开
+
+> 排查套路：`idf.py monitor` 看 panic 地址 → fatal-errors 文档对号入座 → 需要保留现场就开 Core Dump → 仍复现不了查勘误表。
