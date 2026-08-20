@@ -84,7 +84,7 @@ public:
         args.name = "servo_idle";
         args.skip_unhandled_events = true;
         esp_timer_create(&args, &idle_timer_);
-        esp_timer_start_periodic(idle_timer_, 4000000);
+        esp_timer_start_periodic(idle_timer_, 8000000);
         scan_running_ = true;
         return true;
     }
@@ -109,7 +109,7 @@ public:
 
     void ResumeScan() {
         if (!scan_running_ && idle_timer_) {
-            esp_timer_start_periodic(idle_timer_, 4000000);
+            esp_timer_start_periodic(idle_timer_, 8000000);
             scan_running_ = true;
         }
     }
@@ -129,7 +129,7 @@ private:
         auto* self = static_cast<StackChanServo*>(arg);
         int yaw = (rand() % 51) - 25;
         int pitch = 25 + (rand() % 11);
-        self->MoveTo(yaw, pitch, 1500);
+        self->MoveTo(yaw, pitch, 2500);
     }
 
     SCSCL bus_;
