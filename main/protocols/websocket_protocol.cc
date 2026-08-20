@@ -8,6 +8,7 @@
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
+#include <algorithm>
 #include "assets/lang_config.h"
 
 #define TAG "WS"
@@ -77,10 +78,25 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+    deliberate_close_ = true;
+    if (reconnect_task_ != nullptr) {
+        vTaskDelete(reconnect_task_);
+        reconnect_task_ = nullptr;
+    }
     websocket_.reset();
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    deliberate_close_ = false;
+    reconnect_delay_sec_ = 30;
+    if (reconnect_task_ != nullptr) {
+        vTaskDelete(reconnect_task_);
+        reconnect_task_ = nullptr;
+    }
+    return ConnectInternal();
+}
+
+bool WebsocketProtocol::ConnectInternal() {
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     std::string token = settings.GetString("token");
@@ -167,6 +183,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     websocket_->OnDisconnected([this]() {
         ESP_LOGI(TAG, "Websocket disconnected");
+        // 空闲保活: 非主动关闭时自动重连(30s 起, 指数退避至 300s)
+        if (!deliberate_close_) {
+            ScheduleReconnect();
+        }
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
@@ -198,6 +218,59 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     return true;
+}
+
+void WebsocketProtocol::ScheduleReconnect() {
+    if (reconnect_task_ != nullptr) {
+        return;  // 已有一个重连任务在跑
+    }
+    if (deliberate_close_) {
+        return;
+    }
+    if (reconnect_delay_sec_ < 30) {
+        reconnect_delay_sec_ = 30;
+    }
+    ESP_LOGI(TAG, "Scheduling reconnect in %d s", reconnect_delay_sec_);
+    xTaskCreate(ReconnectTask, "ws_reconnect", 4096, this, 1, &reconnect_task_);
+}
+
+void WebsocketProtocol::ReconnectTask(void* arg) {
+    auto* self = static_cast<WebsocketProtocol*>(arg);
+    int delay = self->reconnect_delay_sec_;
+
+    // 等待退避时间; 期间被主动关闭或已连上则放弃
+    for (int i = 0; i < delay; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (self->deliberate_close_) {
+            self->reconnect_task_ = nullptr;
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (self->websocket_ != nullptr && self->websocket_->IsConnected()) {
+            self->reconnect_task_ = nullptr;
+            vTaskDelete(nullptr);
+            return;
+        }
+    }
+
+    self->reconnect_task_ = nullptr;
+    if (self->deliberate_close_) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Reconnecting to server...");
+    bool ok = self->ConnectInternal();
+    if (ok) {
+        ESP_LOGI(TAG, "Reconnected successfully");
+        self->reconnect_delay_sec_ = 30;
+    } else {
+        ESP_LOGW(TAG, "Reconnect failed, backoff %d -> %d s", self->reconnect_delay_sec_,
+                 std::min(self->reconnect_delay_sec_ * 2, 300));
+        self->reconnect_delay_sec_ = std::min(self->reconnect_delay_sec_ * 2, 300);
+        self->ScheduleReconnect();
+    }
+    vTaskDelete(nullptr);
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {

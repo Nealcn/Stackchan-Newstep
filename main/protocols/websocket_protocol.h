@@ -26,6 +26,15 @@ private:
     std::unique_ptr<WebSocket> websocket_;
     int version_ = 1;
 
+    // ==== 空闲保活: 断线自动重连 ====
+    bool deliberate_close_ = false;       // 主动关闭(不重连)
+    TaskHandle_t reconnect_task_ = nullptr;
+    int reconnect_delay_sec_ = 30;        // 重连退避: 30s 起步, 上限 300s
+
+    bool ConnectInternal();
+    void ScheduleReconnect();
+    static void ReconnectTask(void* arg);
+
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
