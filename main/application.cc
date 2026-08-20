@@ -527,8 +527,7 @@ void Application::InitializeProtocol() {
         // tts_start_pending_：tts start 经 Schedule 异步生效，先到的音频帧放行
         // （MQTT 双通道无顺序保证；进 Speaking 时 ResetDecoder 清过期帧防串音）
         auto state = GetDeviceState();
-        if (state == kDeviceStateSpeaking ||
-            (state == kDeviceStateListening && tts_start_pending_.load())) {
+        if (tts_start_pending_.load() || state == kDeviceStateSpeaking) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
