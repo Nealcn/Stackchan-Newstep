@@ -30,7 +30,6 @@ protected:
     lv_display_t *display_ = nullptr;
 
     lv_obj_t *network_label_ = nullptr;
-    lv_obj_t *server_label_ = nullptr;  // 服务器连接指示器（"1"=自建 "2"=官方，断开为空）
     lv_obj_t *status_label_ = nullptr;
     lv_obj_t *notification_label_ = nullptr;
     lv_obj_t *mute_label_ = nullptr;
@@ -40,7 +39,6 @@ protected:
     
     const char* battery_icon_ = nullptr;
     const char* network_icon_ = nullptr;
-    const char* server_indicator_ = nullptr;  // 缓存上次显示的服务器指示
     bool muted_ = false;
 
     std::chrono::system_clock::time_point last_status_update_time_;

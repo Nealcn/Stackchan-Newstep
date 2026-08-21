@@ -418,17 +418,11 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
 
-    // Left icon
+    // Left icon（WiFi 图标；服务器归属用颜色指示：官方云=绿，自建=白）
     network_label_ = lv_label_create(top_bar_);
     lv_label_set_text(network_label_, "");
     lv_obj_set_style_text_font(network_label_, icon_font, 0);
     lv_obj_set_style_text_color(network_label_, lv_color_white(), 0);
-
-    // Server indicator（WiFi 图标右侧："1"=自建 "2"=官方云，断开为空）
-    server_label_ = lv_label_create(top_bar_);
-    lv_label_set_text(server_label_, "");
-    lv_obj_set_style_text_font(server_label_, icon_font, 0);
-    lv_obj_set_style_text_color(server_label_, lv_color_hex(0x888888), 0);
 
     // Right icons container
     lv_obj_t* right_icons = lv_obj_create(top_bar_);
