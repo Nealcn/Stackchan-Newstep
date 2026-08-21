@@ -66,6 +66,8 @@ public:
     void Run();
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
+    // 音频通道（WS/MQTT 服务器连接）是否打开，供状态栏指示器使用
+    bool IsAudioChannelOpened() const { return protocol_ != nullptr && protocol_->IsAudioChannelOpened(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
     
     /**

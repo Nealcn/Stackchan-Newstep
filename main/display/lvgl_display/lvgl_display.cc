@@ -49,6 +49,9 @@ LvglDisplay::~LvglDisplay() {
     if (network_label_ != nullptr) {
         lv_obj_del(network_label_);
     }
+    if (server_label_ != nullptr) {
+        lv_obj_del(server_label_);
+    }
     if (notification_label_ != nullptr) {
         lv_obj_del(notification_label_);
     }
@@ -212,6 +215,25 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 network_icon_ = icon;
                 lv_label_set_text(network_label_, network_icon_);
             }
+        }
+
+        // Server indicator："1"=自建服务器 "2"=官方云，断开连接显示空
+        Settings settings("websocket", false);
+        std::string ws_url = settings.GetString("url");
+        const char* indicator = "";
+        if (Application::GetInstance().IsAudioChannelOpened()) {
+            if (!ws_url.empty() &&
+                (ws_url.find("xiaozhi.me") != std::string::npos ||
+                 ws_url.find("tenclass.net") != std::string::npos)) {
+                indicator = "2";  // 官方云
+            } else if (!ws_url.empty()) {
+                indicator = "1";  // 自建服务器
+            }
+        }
+        if (server_label_ != nullptr && server_indicator_ != indicator) {
+            DisplayLockGuard lock(this);
+            server_indicator_ = indicator;
+            lv_label_set_text(server_label_, server_indicator_);
         }
     }
 
