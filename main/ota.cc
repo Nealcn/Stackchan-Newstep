@@ -281,6 +281,16 @@ int Ota::TryCheckVersion(const std::string& url, int timeout_ms) {
         ESP_LOGW(TAG, "No server_time section found!");
     }
 
+#ifdef CONFIG_OTA_SKIP_UPDATE_ON_FALLBACK
+    // 官方云等非自建节点：完全不检查固件版本（仅做服务器发现，防官方固件覆盖）
+    if (!IsSelfHostedServer(url)) {
+        ESP_LOGI(TAG, "Fallback server (%s): firmware check skipped (OTA_SKIP_UPDATE_ON_FALLBACK)",
+                 url.c_str());
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+#endif
+
     has_new_version_ = false;
     cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
     if (cJSON_IsObject(firmware)) {

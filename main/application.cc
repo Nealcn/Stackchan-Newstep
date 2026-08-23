@@ -424,47 +424,39 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
-    int retry_count = 0;
-    int retry_delay = 10; // Initial retry delay in seconds
-
     auto& board = Board::GetInstance();
     while (true) {
         auto display = board.GetDisplay();
-        display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
 
         esp_err_t err = ota_->CheckVersion();
         if (err != ESP_OK) {
-            retry_count++;
-            if (retry_count >= MAX_RETRY) {
-                ESP_LOGE(TAG, "Too many retries, exit version check");
-                return;
-            }
-
-            char error_message[128];
-            snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
-            char buffer[256];
-            snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
-            Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
-
-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay, retry_count, MAX_RETRY);
-            for (int i = 0; i < retry_delay; i++) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                if (GetDeviceState() == kDeviceStateIdle) {
+            // 首次失败：等时间同步后再试一次（https TLS 证书校验需要正确系统时间，
+            // 而 SNTP 延迟启动晚于 OTA 检查）。仍失败则静默退出用 NVS 已有配置。
+            ESP_LOGW(TAG, "Check version failed (0x%x), waiting for time sync...", err);
+            bool time_synced = false;
+            for (int i = 0; i < 150; i++) {  // 最多等 15s（SNTP 约 22s 完成）
+                if (time(nullptr) > 1700000000) {  // 2023-11 之后视为已同步
+                    time_synced = true;
                     break;
                 }
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
-            retry_delay *= 2; // Double the retry delay
-            continue;
+            if (time_synced) {
+                ESP_LOGI(TAG, "Time synced, retrying version check");
+                err = ota_->CheckVersion();
+            }
+            if (err != ESP_OK) {
+                // 重试仍失败：静默退出，不提示不重试，用 NVS 已有配置连接
+                ESP_LOGW(TAG, "Version check failed after retry (0x%x), using existing config", err);
+                return;
+            }
         }
-        retry_count = 0;
-        retry_delay = 10; // Reset retry delay
 
+        // 自动固件升级已关闭：检测到新版本仅记日志，不提示不升级
+        // （想升级时通过语音/MCP self.upgrade_firmware 手动执行）
         if (ota_->HasNewVersion()) {
-            if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
-                return; // This line will never be reached after reboot
-            }
-            // If upgrade failed, continue to normal operation
+            ESP_LOGI(TAG, "New firmware available: %s (auto-upgrade disabled)",
+                     ota_->GetFirmwareVersion().c_str());
         }
 
         // No new version, mark the current version as valid

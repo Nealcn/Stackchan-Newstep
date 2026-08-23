@@ -1540,6 +1540,37 @@ private:
         vTaskDelete(nullptr);
     }
 
+    // HTTP 时间同步兜底：SNTP(UDP) 可能被网络限制，用自建服务器 http 的
+    // Date 响应头同步系统时间。仅在系统时间无效（<2023）时执行。
+    void SyncTimeViaHttp() {
+        if (time(nullptr) >= 1700000000) return;  // 时间已有效则跳过
+        auto network = GetNetwork();
+        if (network == nullptr) return;
+        auto http = network->CreateHttp(0);
+        http->SetTimeout(5000);
+        if (http->Open("GET", CONFIG_OTA_LAN_URL)) {
+            std::string date = http->GetResponseHeader("Date");
+            http->Close();
+            if (!date.empty()) {
+                struct tm tm = {};
+                // 格式如: "Wed, 20 Aug 2026 09:30:00 GMT"
+                if (strptime(date.c_str(), "%a, %d %b %Y %H:%M:%S GMT", &tm) != nullptr) {
+                    // tm 是 GMT；mktime 按本地时区(CST-8)解释，减 8h 转回 UTC 时间戳
+                    time_t t = mktime(&tm) - 8 * 3600;
+                    if (t > 1700000000) {
+                        struct timeval tv = {t, 0};
+                        settimeofday(&tv, nullptr);
+                        ESP_LOGI(TAG, "Time synced via HTTP Date header: %s", date.c_str());
+                        return;
+                    }
+                }
+            }
+            ESP_LOGW(TAG, "HTTP time sync failed (no valid Date header)");
+        } else {
+            ESP_LOGW(TAG, "HTTP time sync failed (cannot reach %s)", CONFIG_OTA_LAN_URL);
+        }
+    }
+
     void MorningLoop() {
         // 工作日早 7:50（容差 7:50-7:55）触发一次"早安+天气"
 
@@ -1549,9 +1580,14 @@ private:
             esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
             esp_sntp_setservername(0, "ntp.aliyun.com");
             esp_sntp_setservername(1, "ntp.tencent.com");
+            esp_sntp_setservername(2, "ntp.ntsc.ac.cn");   // 国家授时中心
+            esp_sntp_setservername(3, "cn.pool.ntp.org");
             esp_sntp_init();
             ESP_LOGI(TAG, "SNTP started (delayed)");
         }
+        // HTTP 时间兜底：SNTP(UDP 123)可能被网络限制，改用自建服务器
+        // （http 可达）的 Date 响应头同步系统时间（https 证书校验需要正确时间）
+        SyncTimeViaHttp();
 
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(60000));  // 每分钟检查一次
