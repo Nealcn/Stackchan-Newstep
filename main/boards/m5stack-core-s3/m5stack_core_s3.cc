@@ -210,7 +210,8 @@ private:
                     uint8_t brightness = cur_frame[idx];
                     if (brightness > 200) continue;
                     int diff = abs((int)cur_frame[idx] - (int)prev_frame_[idx]);
-                    if (diff > 20) {
+                    // 阈值 32：滤掉 GC0308 低光噪声（20 时噪声像素易误触发导致待机乱摇头）
+                    if (diff > 32) {
                         sum_x += dx;
                         sum_y += dy;
                         count++;
@@ -224,7 +225,8 @@ private:
         if (!ok) return;
 
         int total_pixels = (DS_W - 2) * (DS_H - 4);
-        if (count < 3 || count > total_pixels / 3) {
+        // 最少 8 像素移动才视为有效运动（噪声是零星像素，人脸/手部是大面积）
+        if (count < 8 || count > total_pixels / 3) {
             no_move_count_++;
             if (no_move_count_ > 6 && tracking_) {
                 tracking_ = false;
@@ -400,7 +402,8 @@ enum class Expression {
     Loving, Crying,
     Kissy, Cool, Confident,
     Shocked, Thinking, Surprised, Confused,
-    Embarrassed, Silly, Winking, Laughing, Funny, Relaxed, Delicious
+    Embarrassed, Silly, Winking, Laughing, Funny, Relaxed, Delicious,
+    Dizzy, Drool, StarEyes, Tongue, Yawn, Fuming
 };
 
 struct Overlay {
@@ -721,6 +724,42 @@ private:
                 DrawLine(layer, cx - 15, cy + y_off, cx + 15, cy + y_off + 2, 3, true, fg);
                 return;
             }
+            case Expression::Dizzy: {
+                // 晕眩: 歪斜嘴
+                DrawLine(layer, cx - 15, cy + y_off + 6, cx + 15, cy + y_off - 2, 3, true, fg);
+                return;
+            }
+            case Expression::Drool: {
+                // 流口水: 小嘴 + 垂涎
+                DrawLine(layer, cx - 8, cy + y_off, cx + 8, cy + y_off, 3, true, fg);
+                const lv_color_t blue = lv_color_make(0x60, 0xC0, 0xFF);
+                DrawLine(layer, cx + 10, cy + y_off + 2, cx + 10, cy + y_off + 9, 2, true, blue);
+                FillCircle(layer, cx + 10, cy + y_off + 12, 4, blue);
+                return;
+            }
+            case Expression::StarEyes: {
+                // 星星眼: 上弯微笑嘴
+                DrawArc(layer, cx, cy + y_off + 4, 14, 20, 160, 3, fg, false);
+                return;
+            }
+            case Expression::Tongue: {
+                // 吐舌: 张嘴 + 红舌
+                FillRoundRect(layer, cx - 18, cy + y_off - 6, 36, 16, 6, fg);
+                const lv_color_t red = lv_color_make(0xFF, 0x50, 0x70);
+                FillRoundRect(layer, cx - 8, cy + y_off + 4, 16, 14, 7, red);
+                return;
+            }
+            case Expression::Yawn: {
+                // 打哈欠: 大张嘴
+                int h = 4 + (int)((60 - 4) * 0.9f);
+                FillRoundRect(layer, cx - 28, cy + y_off - h / 2, 56, h, 20, fg);
+                return;
+            }
+            case Expression::Fuming: {
+                // 生气: 下弯嘴
+                DrawArc(layer, cx, cy + y_off + 6, 12, 200, 340, 3, fg, false);
+                return;
+            }
             default: {
                 int h = 4 + (int)((60 - 4) * mouth_open_);
                 int w = 50 + (int)((90 - 50) * (1.0f - mouth_open_));
@@ -756,6 +795,38 @@ private:
         if (expression_ == Expression::Shocked) {
             FillCircle(layer, cx_base, cy, 13, fg);
             FillCircle(layer, cx_base, cy, 3, bg);
+            return;
+        }
+
+        if (expression_ == Expression::Dizzy) {
+            // 晕眩: 同心圆漩涡眼
+            FillCircle(layer, cx_base + off_x, cy + off_y, 9, fg);
+            FillCircle(layer, cx_base + off_x, cy + off_y, 5, bg);
+            FillCircle(layer, cx_base + off_x, cy + off_y, 2, fg);
+            return;
+        }
+
+        if (expression_ == Expression::StarEyes) {
+            // 星星眼: 四角星
+            int sx = cx_base + off_x, sy = cy + off_y;
+            FillTriangle(layer, sx - 8, sy, sx + 8, sy, sx, sy - 12, fg);
+            FillTriangle(layer, sx - 8, sy, sx + 8, sy, sx, sy + 12, fg);
+            FillTriangle(layer, sx, sy - 8, sx, sy + 8, sx - 12, sy, fg);
+            FillTriangle(layer, sx, sy - 8, sx, sy + 8, sx + 12, sy, fg);
+            FillCircle(layer, sx, sy, 3, fg);
+            return;
+        }
+
+        if (expression_ == Expression::Yawn) {
+            // 打哈欠: 眯眼(上弯弧)
+            DrawArc(layer, cx_base, cy, 9, 200, 340, 3, fg, false);
+            return;
+        }
+
+        if (expression_ == Expression::Fuming) {
+            // 生气: 眯眼 + 眼珠下移
+            DrawArc(layer, cx_base, cy, 8, 200, 340, 3, fg, false);
+            FillCircle(layer, cx_base + off_x, cy + off_y + 3, 3, fg);
             return;
         }
 
@@ -857,6 +928,16 @@ private:
     }
 
     void DrawOverlay(lv_layer_t* layer, lv_color_t fg, lv_color_t bg) {
+        if (expression_ == Expression::Fuming) {
+            // 生气冒烟: 头顶三缕烟(上升小弧)
+            for (int i = 0; i < 3; i++) {
+                int sx = 142 + i * 20;
+                int sy = 56 - i * 10;
+                DrawArc(layer, sx, sy, 8, 180, 360, 2, fg, false);
+                DrawArc(layer, sx + 12, sy - 8, 5, 180, 360, 2, fg, false);
+            }
+        }
+
         if (overlay_.tear) {
             const lv_color_t blue = lv_color_make(0x40, 0xA0, 0xFF);
             int tx = 90;
@@ -1002,6 +1083,12 @@ static Expression MapEmotion(const char* e) {
     if (!strcmp(e, "sleepy"))      return Expression::Sleepy;
     if (!strcmp(e, "silly"))       return Expression::Silly;
     if (!strcmp(e, "confused"))    return Expression::Confused;
+    if (!strcmp(e, "dizzy"))       return Expression::Dizzy;
+    if (!strcmp(e, "drool"))       return Expression::Drool;
+    if (!strcmp(e, "stareyes"))    return Expression::StarEyes;
+    if (!strcmp(e, "tongue"))      return Expression::Tongue;
+    if (!strcmp(e, "yawn"))        return Expression::Yawn;
+    if (!strcmp(e, "fuming"))      return Expression::Fuming;
     return Expression::Neutral;
 }
 
