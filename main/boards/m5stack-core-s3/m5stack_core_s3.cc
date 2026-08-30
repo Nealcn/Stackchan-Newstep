@@ -1210,6 +1210,8 @@ public:
 
     void SetStatus(const char* status) override {
         SpiLcdDisplay::SetStatus(status);
+        // 灯光随状态变化——LED 独立于表情画布，avatar 未就绪也要亮
+        if (led_updater_) led_updater_("");
         if (!status || !avatar_.IsReady()) return;
         DisplayLockGuard lock(this);
         auto state = Application::GetInstance().GetDeviceState();
@@ -1230,8 +1232,6 @@ public:
             SetActiveLocked(true);
             BumpIdleTimerLocked();
         }
-        // 灯光随状态变化
-        if (led_updater_) led_updater_("");
     }
 
 private:
@@ -2837,13 +2837,19 @@ public:
             } else if (state == kDeviceStateListening) {
                 color = Rgb888To565(0, 255, 0);      // 聆听：绿色
             }
+            ESP_LOGI(TAG, "[led] state=%d manual=%d py32=%d color=0x%04x",
+                     (int)state, (int)led_manual_, (int)(py32_dev_ != nullptr), color);
+            bool ok = false;
             if (color != 0) {
                 uint16_t colors[12];
                 for (int i = 0; i < 12; i++) colors[i] = color;
-                Py32SetLedFrame(colors, 12);
+                ok = Py32SetLedFrame(colors, 12);
             } else {
                 uint16_t off[12] = {};
-                Py32SetLedFrame(off, 12);            // 待机：灭
+                ok = Py32SetLedFrame(off, 12);       // 待机：灭
+            }
+            if (!ok) {
+                ESP_LOGE(TAG, "[led] Py32SetLedFrame FAILED (i2c write error)");
             }
         });
         InitializeIr();

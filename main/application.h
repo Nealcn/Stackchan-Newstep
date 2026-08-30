@@ -150,6 +150,7 @@ private:
     std::atomic<bool> tts_start_pending_{false};  // tts start 与音频帧的竞态放行窗口（A2）
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    int64_t listening_start_time_ = 0;  // 聆听超时计时起点(微秒), 0=未计时
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 

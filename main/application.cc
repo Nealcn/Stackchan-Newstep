@@ -273,7 +273,21 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
+            // 聆听超时兜底：ManualStop 后进聆听，20 秒无说话自动回待命
+            // （仅 listening 状态生效，避免误打断 speaking）
+            if (listening_start_time_ > 0 && GetDeviceState() == kDeviceStateListening) {
+                int64_t elapsed_ms = (esp_timer_get_time() - listening_start_time_) / 1000;
+                if (elapsed_ms > 20000) {
+                    ESP_LOGI(TAG, "Listening timeout (%lld ms), back to idle", (long long)elapsed_ms);
+                    listening_start_time_ = 0;
+                    SetDeviceState(kDeviceStateIdle);
+                } else if (clock_ticks_ % 10 == 0) {
+                    ESP_LOGI(TAG, "[lsn] tick: state=%d elapsed_ms=%lld",
+                             (int)GetDeviceState(), (long long)elapsed_ms);
+                }
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -564,11 +578,12 @@ void Application::InitializeProtocol() {
                 tts_start_pending_.store(false);  // 防悬挂
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                        // TTS 停止后进聆听（可继续说话），无条件启动 20 秒本地超时：
+                        // ManualStop 和 AutoStop 都适用（AutoStop 服务器静音检测 + 本地兜底双保险）
+                        SetDeviceState(kDeviceStateListening);
+                        listening_start_time_ = esp_timer_get_time();
+                        ESP_LOGI(TAG, "[lsn] tts stop -> listening, mode=%d, timer start=%lld",
+                                 (int)listening_mode_, (long long)listening_start_time_);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -770,7 +785,11 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
-    
+    // 重新聆听时重启 20 秒超时计时（服务器 TTS 结束后会再次 listen start，
+    // 若清零则计时永不启动导致超时失效；tick 检查有 listening 状态保护）
+    listening_start_time_ = esp_timer_get_time();
+    ESP_LOGI(TAG, "[lsn] StartListeningEvent: state=%d, timer restarted", (int)state);
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;

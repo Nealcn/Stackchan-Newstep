@@ -8,6 +8,14 @@ config OTA_CHECK_ENABLED
         OTA server). The device will reuse the server (websocket/mqtt) config
         already stored in NVS. Useful for temporarily disabling OTA.
 
+config IR_LEARN_ENABLED
+    bool "Enable IR remote learning"
+    default y
+    help
+        Set to n to disable IR remote control learning (both touch screen and
+        voice learning). IR emitting (self.ir.send) is NOT affected.
+        Useful for temporarily disabling learning.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

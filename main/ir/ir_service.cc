@@ -88,6 +88,10 @@ bool IrService::Emit(const std::string& device_id, const std::string& key, std::
 }
 
 bool IrService::LearnStart(int timeout_ms) {
+#if !CONFIG_IR_LEARN_ENABLED
+    ESP_LOGW(kTag, "IR learning disabled (IR_LEARN_ENABLED=n)");
+    return false;
+#endif
     if (mutex_ == nullptr || driver_ == nullptr || store_ == nullptr) return false;
     if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(200)) != pdTRUE) return false;
     if (state_ == IrState::kLearning) {
