@@ -10,8 +10,10 @@ class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
     esp_timer_handle_t wifi_config_delay_timer_ = nullptr;   // 8-second delay before allowing config on tap
+    esp_timer_handle_t wifi_keepalive_timer_ = nullptr;      // 60s WiFi 保活定时器（静默重连）
     bool in_config_mode_ = false;
     bool wifi_config_ready_ = false;   // Set after 8s when no saved SSID, enables tap to config
+    bool wifi_connected_ = false;      // WiFi 连接状态标志（保活检查用）
     NetworkEventCallback network_event_callback_ = nullptr;
 
     virtual std::string GetBoardJson() override;
@@ -42,6 +44,11 @@ protected:
      * 8-second delay timer callback — sets wifi_config_ready_ flag so a tap enters config mode
      */
     static void OnWifiConfigReadyTimer(void* arg);
+
+    /**
+     * WiFi keepalive callback — silent reconnect when disconnected (every 60s)
+     */
+    static void OnWifiKeepalive(void* arg);
 
 public:
     WifiBoard();
