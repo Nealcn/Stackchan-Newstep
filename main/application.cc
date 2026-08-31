@@ -344,6 +344,10 @@ void Application::HandleActivationDoneEvent() {
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
+    // 加载 assets 分区(模型等): CheckAssetsVersion 在此 fork 缺失调用者,
+    // 导致 SetModelsList 从未执行、wake_word_ 为 null、待机唤醒词失效
+    CheckAssetsVersion();
+
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
