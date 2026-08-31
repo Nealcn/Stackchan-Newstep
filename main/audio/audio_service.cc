@@ -552,11 +552,10 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
 
 void AudioService::EnableWakeWordDetection(bool enable) {
     if (!wake_word_) {
-        ESP_LOGW(TAG, "[ww] EnableWakeWordDetection(%d) but wake_word_ is NULL", (int)enable);
         return;
     }
 
-    ESP_LOGI(TAG, "[ww] %s wake word detection", enable ? "Enabling" : "Disabling");
+    ESP_LOGD(TAG, "%s wake word detection", enable ? "Enabling" : "Disabling");
     if (enable) {
         if (!wake_word_initialized_) {
             if (!wake_word_->Initialize(codec_, models_list_)) {
@@ -704,15 +703,11 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
-    ESP_LOGI(TAG, "[ww] SetModelsList: models=%p", (void*)models_list);
 
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
-    const char* mn = esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL);
-    const char* wn = esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL);
-    ESP_LOGI(TAG, "[ww] MN model=%s, WN model=%s", mn ? mn : "(none)", wn ? wn : "(none)");
-    if (mn != nullptr) {
+    if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<CustomWakeWord>();
-    } else if (wn != nullptr) {
+    } else if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<AfeWakeWord>();
     } else {
         wake_word_ = nullptr;
