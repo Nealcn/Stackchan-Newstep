@@ -151,6 +151,7 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int64_t listening_start_time_ = 0;  // 聆听超时计时起点(微秒), 0=未计时
+    bool ota_self_heal_started_ = false;  // OTA 自愈任务是否已启动
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -173,6 +174,7 @@ private:
     // Helper methods
     void CheckAssetsVersion();
     void CheckNewVersion();
+    void StartOtaSelfHeal();  // OTA 自愈：首轮失败后后台周期重试
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

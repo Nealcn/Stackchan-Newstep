@@ -344,6 +344,11 @@ void Application::HandleActivationDoneEvent() {
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
+    // 启动 OTA 自愈任务：若首轮服务器发现失败（自建停机/网络抖动），
+    // 后台每 60s 重试 OTA 检查，成功后 NVS websocket 配置更新，
+    // WS 下次连接/重连会自动使用新服务器地址
+    StartOtaSelfHeal();
+
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
@@ -360,6 +365,30 @@ void Application::HandleActivationDoneEvent() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     });
+}
+
+// OTA 自愈任务：首轮服务器发现失败后，后台周期重试。
+// 每次创建独立 Ota 实例（激活完成后 ota_ 已释放）；成功即更新 NVS
+// websocket 配置，WS 下次连接/重连自动使用新服务器地址。
+void Application::StartOtaSelfHeal() {
+    if (ota_self_heal_started_) return;
+    ota_self_heal_started_ = true;
+    xTaskCreate([](void* arg) {
+        auto* app = static_cast<Application*>(arg);
+        vTaskDelay(pdMS_TO_TICKS(30000));  // 首次 30s 后（时间同步完成）
+        while (true) {
+            auto ota = std::make_unique<Ota>();
+            esp_err_t err = ota->CheckVersion();
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "OTA self-heal OK: server config updated in NVS "
+                              "(WS reconnect will use the new server)");
+            } else {
+                ESP_LOGW(TAG, "OTA self-heal failed (0x%x), retry in 60s", err);
+            }
+            (void)app;
+            vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+    }, "ota_self_heal", 4096, this, 1, nullptr);
 }
 
 void Application::ActivationTask() {
@@ -448,7 +477,7 @@ void Application::CheckNewVersion() {
             // 而 SNTP 延迟启动晚于 OTA 检查）。仍失败则静默退出用 NVS 已有配置。
             ESP_LOGW(TAG, "Check version failed (0x%x), waiting for time sync...", err);
             bool time_synced = false;
-            for (int i = 0; i < 150; i++) {  // 最多等 15s（SNTP 约 22s 完成）
+            for (int i = 0; i < 300; i++) {  // 最多等 30s（SNTP 约 22s 完成，官方 https 需正确时间）
                 if (time(nullptr) > 1700000000) {  // 2023-11 之后视为已同步
                     time_synced = true;
                     break;
@@ -460,7 +489,8 @@ void Application::CheckNewVersion() {
                 err = ota_->CheckVersion();
             }
             if (err != ESP_OK) {
-                // 重试仍失败：静默退出，不提示不重试，用 NVS 已有配置连接
+                // 重试仍失败：静默退出（激活流程继续，用 NVS 已有配置先连），
+                // 后台自愈任务（StartOtaSelfHeal）会周期重试并更新 NVS
                 ESP_LOGW(TAG, "Version check failed after retry (0x%x), using existing config", err);
                 return;
             }
