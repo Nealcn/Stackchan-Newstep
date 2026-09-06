@@ -43,7 +43,6 @@ set(SOURCES "audio/audio_codec.cc"
             "ir/ir_store.cc"
             "ir/ir_service.cc"
             "sd/sd_card.cc"
-            "sd/sd_log.cc"
             "sd/sd_photo.cc"
             )
 

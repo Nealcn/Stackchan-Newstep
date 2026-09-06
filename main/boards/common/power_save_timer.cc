@@ -76,17 +76,11 @@ void PowerSaveTimer::PowerSaveCheck() {
             }
 
             if (cpu_max_freq_ != -1) {
-                // Disable wake word detection
-                auto& audio_service = app.GetAudioService();
-                is_wake_word_running_ = audio_service.IsWakeWordRunning();
-                if (is_wake_word_running_) {
-                    audio_service.EnableWakeWordDetection(false);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
-                // Disable audio input
+                // 保留麦克风输入与唤醒词检测：省电（睡觉）时随时喊「土豆土豆」即可唤醒。
+                // 只关闭扬声器输出省电；音频服务进入对话时会自动恢复输出。
                 auto codec = Board::GetInstance().GetAudioCodec();
                 if (codec) {
-                    codec->EnableInput(false);
+                    codec->EnableOutput(false);
                 }
 
                 esp_pm_config_t pm_config = {
@@ -116,13 +110,7 @@ void PowerSaveTimer::WakeUp() {
                 .light_sleep_enable = false,
             };
             esp_pm_configure(&pm_config);
-
-            // Enable wake word detection
-            auto& app = Application::GetInstance();
-            auto& audio_service = app.GetAudioService();
-            if (is_wake_word_running_) {
-                audio_service.EnableWakeWordDetection(true);
-            }
+            // 唤醒词始终开启（省电时未禁用），无需恢复
         }
 
         if (on_exit_sleep_mode_) {
