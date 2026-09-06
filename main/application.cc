@@ -74,7 +74,9 @@ void Application::Initialize() {
     // 注意：set_chat_message 是覆盖式写入，所以必须放在最后
     {
         const char* crash_msg = nullptr;
-        switch (esp_reset_reason()) {
+        esp_reset_reason_t reset_reason = esp_reset_reason();
+        ESP_LOGW(TAG, "Reset reason code: %d", (int)reset_reason);
+        switch (reset_reason) {
             case ESP_RST_PANIC:     crash_msg = "⚠️ 上次崩溃：CPU异常(PANIC)"; break;
             case ESP_RST_INT_WDT:   crash_msg = "⚠️ 上次崩溃：中断看门狗"; break;
             case ESP_RST_TASK_WDT:  crash_msg = "⚠️ 上次崩溃：任务看门狗"; break;

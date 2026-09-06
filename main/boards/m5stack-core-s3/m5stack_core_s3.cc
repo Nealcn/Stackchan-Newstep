@@ -11,6 +11,7 @@
 #include "ir/ir_config.h"
 #include "ir_remote_screen.h"
 #include "sd/sd_card.h"
+#include "sd/sd_log.h"
 #include "sd/sd_photo.h"
 #include <esp_lvgl_port.h>
 
@@ -2354,6 +2355,15 @@ private:
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "SD 卡不可用（拍照存卡功能关闭），可稍后重新插卡");
         }
+        // 临时诊断：日志落 TF 卡（排查完崩溃问题后删除本行与 sd_log 模块）
+        stackchan_sd::SdLog::SetLvglSuspendHook([this](bool suspend) {
+            if (suspend) {
+                lvgl_port_stop();
+            } else {
+                lvgl_port_resume();
+            }
+        });
+        stackchan_sd::SdLog::Start();
     }
 
     // 拍照存卡工具：self.photo.save（SD 未挂载/拍照失败时返回明确错误）
