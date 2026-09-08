@@ -2355,7 +2355,7 @@ private:
             ESP_LOGW(TAG, "SD 卡不可用（拍照存卡功能关闭），可稍后重新插卡");
         }
         // 注：SD 高频写入会与 LCD(SPI3 同总线)刷新冲突 → SPI HAL 断言 PANIC。
-        // 日志落盘方案已废弃(崩溃根因);仅保留低频 read_log 工具(用户语音触发)。
+        // 日志落盘方案已废弃(SPI 冲突崩溃根因);SD 日志读取工具一并移除。
     }
 
     // 拍照存卡工具：self.photo.save（SD 未挂载/拍照失败时返回明确错误）
@@ -2379,29 +2379,6 @@ private:
                 return std::string("照片已保存到 ") + path;
             });
 
-        // self.sd.read_log —— 读取 TF 卡日志尾部（排查问题用，不用拔卡）
-        mcp.AddTool(
-            "self.sd.read_log",
-            "Read the most recent device log entries from the TF card log file "
-            "(/sdcard/stackchan.log). Returns the tail of the log (last ~2000 chars). "
-            "Use this when the user reports crashes, unexpected reboots or other issues, "
-            "to see what the device was doing before the problem.",
-            PropertyList(),
-            [this](const PropertyList&) -> ReturnValue {
-                if (!sd_card_.Mounted()) {
-                    return std::string("SD 卡未挂载，无法读取日志");
-                }
-                uint8_t* data = nullptr;
-                size_t len = 0;
-                if (!sd_card_.ReadFile("/sdcard/stackchan.log", &data, &len)) {
-                    return std::string("日志文件不存在（可能 SD 日志未开启）");
-                }
-                const size_t kTail = 2000;
-                size_t offset = len > kTail ? len - kTail : 0;
-                std::string text(reinterpret_cast<char*>(data) + offset, len - offset);
-                free(data);
-                return text;
-            });
     }
 
     // RS-4：联动转向 2s 后恢复人脸跟随（定时器可复用，重复调用先停旧）
