@@ -351,6 +351,17 @@ void Application::HandleActivationDoneEvent() {
     // WS 下次连接/重连会自动使用新服务器地址
     StartOtaSelfHeal();
 
+    // 加载唤醒词模型(仅模型,不应用字体/表情): 修复待机语音唤醒
+    // (基线缺陷 — CheckAssetsVersion 无调用者导致模型从未加载)
+    {
+        auto& assets = Assets::GetInstance();
+        if (assets.partition_valid() && assets.LoadWakeWordModels()) {
+            ESP_LOGI(TAG, "Wake word models loaded (voice wake enabled)");
+        } else {
+            ESP_LOGW(TAG, "Wake word models load failed (voice wake disabled)");
+        }
+    }
+
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
@@ -366,6 +377,18 @@ void Application::HandleActivationDoneEvent() {
     Schedule([this]() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+
+        // 常在线：开机后自动建立 WS 服务器连接并保持（推送随时可达）。
+        // 仅建连不切状态(不进入聆听)；断开后自动重连(30s 起退避)，
+        // 重连读取 NVS 最新地址(OTA 自愈更新后自动切服务器)。
+        if (protocol_ != nullptr && !protocol_->IsAudioChannelOpened()) {
+            if (!protocol_->OpenAudioChannel()) {
+                ESP_LOGW(TAG, "Auto connect: open audio channel failed "
+                             "(will connect on next wake/conversation)");
+            } else {
+                ESP_LOGI(TAG, "Auto connect: server channel opened (always-online)");
+            }
+        }
     });
 }
 

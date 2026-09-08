@@ -31,6 +31,8 @@ public:
     bool Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback);
     bool Apply(bool refresh_display_theme = true);
     bool GetAssetData(const std::string& name, void*& ptr, size_t& size);
+    // 只加载唤醒词模型(不应用字体/表情等其他 assets — 完整 Apply 曾致崩溃)
+    bool LoadWakeWordModels() { return LoadSrmodelsFromIndex(this, nullptr); }
 
     inline bool partition_valid() const { return partition_valid_; }
     inline std::string default_assets_url() const { return default_assets_url_; }
