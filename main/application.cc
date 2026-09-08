@@ -364,6 +364,17 @@ void Application::HandleActivationDoneEvent() {
     Schedule([this]() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+
+        // 常在线：开机后自动建立 WS 服务器连接并保持（推送随时可达）。
+        // 仅建连不切状态(不进入聆听)；断开后自动重连(30s 起退避)，
+        // 重连读取 NVS 最新地址(OTA 自愈更新后自动切服务器)。
+        if (protocol_ != nullptr && !protocol_->IsAudioChannelOpened()) {
+            if (!protocol_->OpenAudioChannel()) {
+                ESP_LOGW(TAG, "Auto connect: server channel open failed (will retry on demand)");
+            } else {
+                ESP_LOGI(TAG, "Auto connect: server channel opened (always-online)");
+            }
+        }
     });
 }
 
@@ -912,8 +923,11 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    // Check state again in case it was changed during scheduling.
+    // 允许 Connecting(频道未开, 转态后继续) 与 Idle(常在线频道已开, 直接继续)，
+    // 否则常在线模式下语音/触摸唤醒会在此静默丢失
+    auto state_now = GetDeviceState();
+    if (state_now != kDeviceStateConnecting && state_now != kDeviceStateIdle) {
         return;
     }
 
