@@ -1162,7 +1162,7 @@ public:
         avatar_.SetExpression(shizhou_avatar::MapEmotion(emotion));
         avatar_.SetOverlay(shizhou_avatar::OverlayFor(emotion));
         if (emotion && strcmp(emotion, "sleepy") == 0) {
-            SetActiveLocked(false);
+            // 只暂停扫视，不再隐藏顶栏/状态栏（官方行为：常显）
             if (face_tracker_) face_tracker_->Pause(false);
             if (servo_) servo_->PauseScan();
         }
@@ -1253,15 +1253,14 @@ private:
     }
 
     void SetActiveLocked(bool active) {
+        // 官方行为：顶栏(WiFi/电池)与状态文字常显，空闲不再隐藏；
+        // inactive 分支仅保留状态位，face_tracker 由 SetStatus 按设备状态控制
         if (active == active_mode_) return;
         active_mode_ = active;
         if (active) {
             if (top_bar_)    lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
             if (status_bar_) lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
             if (face_tracker_) face_tracker_->Resume();
-        } else {
-            if (top_bar_)    lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
-            if (status_bar_) lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -1298,8 +1297,7 @@ private:
         if (emoji_box_) {
             lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
         }
-        if (top_bar_)    lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
-        if (status_bar_) lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        // 顶栏/状态栏保持可见（官方行为：常显）
 
         if (avatar_init_timer_) {
             esp_timer_stop(avatar_init_timer_);
