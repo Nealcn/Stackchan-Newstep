@@ -937,8 +937,11 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
-    // Check state again in case it was changed during scheduling
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    // Check state again in case it was changed during scheduling.
+    // 允许 Connecting(频道未开, 转态后继续) 与 Idle(常在线频道已开, 直接继续)，
+    // 否则常在线模式下语音/触摸唤醒会在此静默丢失
+    auto state_now = GetDeviceState();
+    if (state_now != kDeviceStateConnecting && state_now != kDeviceStateIdle) {
         return;
     }
 

@@ -109,12 +109,10 @@ bool EspTcp::Connect(const std::string& host, int port) {
 }
 
 void EspTcp::Disconnect() {
-    // 如果已经断开，直接返回
-    if (!connected_) {
-        return;
-    }
-
-    // 主动断开，需要等待接收任务退出
+    // 无论连接状态如何都执行完整断开流程：
+    // 被动断开时 connected_ 已被接收任务置 false，但接收任务可能仍在退出中；
+    // 若此处直接 return，析构方会与仍在运行的接收任务竞争同一对象
+    // (回调访问已释放成员) → 偶发 mutex assert / 死锁崩溃
     DoDisconnect(true);
 }
 
@@ -124,19 +122,23 @@ void EspTcp::DoDisconnect(bool wait_for_task) {
     if (tcp_fd_ != -1) {
         close(tcp_fd_);
         tcp_fd_ = -1;
+    }
 
-        // 只有主动断开时才需要等待接收任务退出
-        // 被动断开时，当前就是接收任务，不需要等待
-        if (wait_for_task) {
-            auto bits = xEventGroupWaitBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
-            if (!(bits & ESP_TCP_EVENT_RECEIVE_TASK_EXIT)) {
-                ESP_LOGE(TAG, "Failed to wait for receive task exit");
-            }
+    // 只有主动断开(或对象析构)时才等待接收任务退出；
+    // 被动断开时当前就是接收任务自身，无需等待
+    if (wait_for_task && receive_task_handle_ != nullptr) {
+        // 接收任务已自行退出(事件位置位)时立即返回
+        auto bits = xEventGroupWaitBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
+        if (!(bits & ESP_TCP_EVENT_RECEIVE_TASK_EXIT)) {
+            ESP_LOGE(TAG, "Failed to wait for receive task exit");
         }
     }
 
-    // 断开连接时触发断开回调
-    if (disconnect_callback_) {
+    // 断开回调只在被动断开时触发（接收任务内：recv 出错/对端关闭）。
+    // 主动断开(Disconnect/析构)若也触发，回调会同步重入 HttpClient 自身
+    // （在 Close()/析构路径上锁自己的 mutex_）→ 与 lvgl 刷新任务的内核
+    // 自旋锁互锁 → 两核 IWDT 死锁崩溃
+    if (!wait_for_task && disconnect_callback_) {
         disconnect_callback_();
     }
 }

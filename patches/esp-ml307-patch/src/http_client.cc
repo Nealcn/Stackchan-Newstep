@@ -15,8 +15,14 @@ HttpClient::HttpClient(NetworkInterface* network, int connect_id) : network_(net
 }
 
 HttpClient::~HttpClient() {
-    if (connected_) {
-        Close();
+    if (tcp_) {
+        if (connected_) {
+            Close();
+        } else {
+            // 被动断开后接收任务可能仍在退出回调中（EspTcp::Disconnect 会等待其结束），
+            // 防止对象析构后回调仍访问已释放的成员（mutex assert / 死锁崩溃根因）
+            tcp_->Disconnect();
+        }
     }
     vEventGroupDelete(event_group_handle_);
 }

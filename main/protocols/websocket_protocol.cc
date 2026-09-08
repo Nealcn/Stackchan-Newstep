@@ -224,7 +224,8 @@ bool WebsocketProtocol::ConnectInternal() {
         on_audio_channel_opened_();
     }
 
-    // 启动保活 Ping: 每 30s 发一次, 防止 NAT/路由器断开空闲连接
+    // 启动保活 Ping: 每 5s 发一次。自建 xiaozhi 服务器约 10s 空闲即断开 WS，
+    // 30s 一次的心跳救不了 → 周期性断连风暴 + TCP 层竞争 → 偶发崩溃
     if (keep_alive_task_ == nullptr) {
         xTaskCreate(KeepAliveTask, "ws_keepalive", 2048, this, 1, &keep_alive_task_);
     }
@@ -234,7 +235,7 @@ bool WebsocketProtocol::ConnectInternal() {
 void WebsocketProtocol::KeepAliveTask(void* arg) {
     auto* self = static_cast<WebsocketProtocol*>(arg);
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
         if (self->websocket_ && self->websocket_->IsConnected() && !self->deliberate_close_) {
             self->websocket_->Ping();
         } else {
