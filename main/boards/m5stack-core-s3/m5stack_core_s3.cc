@@ -10,8 +10,6 @@
 #include "ir/ir_service.h"
 #include "ir/ir_config.h"
 #include "ir_remote_screen.h"
-#include "sd/sd_card.h"
-#include "sd/sd_photo.h"
 #include <esp_lvgl_port.h>
 
 #include <esp_log.h>
@@ -1461,8 +1459,6 @@ private:
     esp_timer_handle_t led_flash_timer_ = nullptr;    // FR-08：LED 反馈闪烁定时器
     IrRemoteScreen ir_remote_screen_;
     bool remote_screen_open_ = false;  // 遥控屏打开标志（触控语义让渡，RS-3）
-    // ---- SD 卡（TF，SPI 模式，与 LCD 共用 SPI3 总线）----
-    stackchan_sd::SdCard sd_card_;
     // ---- 语音学习（异步 MCP self.ir.learn_start）上下文 ----
     std::string ir_learn_device_;  // 学习目标设备名（不存在则自动创建）
     std::string ir_learn_key_;     // 学习中按键
@@ -2338,49 +2334,6 @@ private:
             });
     }
 
-    // ---- SD 卡（TF）集成（本项目新增）----
-    // GPIO35 为 LCD-DC/SD-MISO 复用：SD 操作期间由 SdGpioGuard 切输入 +
-    // lvgl_port_stop 暂停 LCD 刷新，避免 DC 浮空窗口把面板刷花（BSP 已知限制）
-    void InitializeSdCard() {
-        sd_card_.SetLvglSuspendHook([](bool suspend) {
-            if (suspend) {
-                lvgl_port_stop();
-            } else {
-                lvgl_port_resume();
-            }
-        });
-        RegisterSdMcpTools();  // 无条件注册：未挂载时工具返回明确错误
-        esp_err_t err = sd_card_.Init();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "SD 卡不可用（拍照存卡功能关闭），可稍后重新插卡");
-        }
-        // 注：SD 高频写入会与 LCD(SPI3 同总线)刷新冲突 → SPI HAL 断言 PANIC。
-        // 日志落盘方案已废弃(SPI 冲突崩溃根因);SD 日志读取工具一并移除。
-    }
-
-    // 拍照存卡工具：self.photo.save（SD 未挂载/拍照失败时返回明确错误）
-    void RegisterSdMcpTools() {
-        auto& mcp = McpServer::GetInstance();
-        mcp.AddTool(
-            "self.photo.save",
-            "Take a photo with the front camera and save it as a JPEG file on the microSD "
-            "card (TF card), under /sdcard/photos/. Use when the user asks to take a photo "
-            "and keep it, or take photos on demand. filename is optional; omit it to use an "
-            "auto timestamp name. Returns the saved file path, or an error message if the "
-            "SD card is not mounted or the photo failed.",
-            PropertyList({Property("filename", kPropertyTypeString, std::string(""))}),
-            [this](const PropertyList& props) -> ReturnValue {
-                std::string err;
-                std::string path = SavePhotoToSd(camera_, &sd_card_,
-                                                 props["filename"].value<std::string>(), &err);
-                if (path.empty()) {
-                    return std::string("拍照存卡失败：") + err;
-                }
-                return std::string("照片已保存到 ") + path;
-            });
-
-    }
-
     // RS-4：联动转向 2s 后恢复人脸跟随（定时器可复用，重复调用先停旧）
     void SchedulePanRestore() {
         if (pan_restore_timer_ == nullptr) {
@@ -2820,7 +2773,6 @@ public:
         InitializeSpi();
         InitializeIli9342Display();
         InitializeCamera();
-        InitializeSdCard();
         auto* avatar_display = static_cast<M5StackAvatarDisplay*>(display_);
         if (servo_ok_) {
             avatar_display->SetServo(&servo_);
