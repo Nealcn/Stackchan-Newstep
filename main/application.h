@@ -68,6 +68,8 @@ public:
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     // 音频通道（WS/MQTT 服务器连接）是否打开，供状态栏指示器使用
     bool IsAudioChannelOpened() const { return protocol_ != nullptr && protocol_->IsAudioChannelOpened(); }
+    // 当前设备状态对应的顶栏状态文字(与 HandleStateChangedEvent 同一来源);无文字返回 nullptr
+    const char* GetStatusTextByState() const;
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
     
     /**

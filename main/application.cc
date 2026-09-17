@@ -966,6 +966,23 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 #endif
 }
 
+const char* Application::GetStatusTextByState() const {
+    // 与 HandleStateChangedEvent 的状态文字单一来源,保证顶栏显示与真实状态一致
+    switch (GetDeviceState()) {
+        case kDeviceStateUnknown:
+        case kDeviceStateIdle:
+            return Lang::Strings::STANDBY;
+        case kDeviceStateConnecting:
+            return Lang::Strings::CONNECTING;
+        case kDeviceStateListening:
+            return Lang::Strings::LISTENING;
+        case kDeviceStateSpeaking:
+            return Lang::Strings::SPEAKING;
+        default:
+            return nullptr;
+    }
+}
+
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
@@ -978,19 +995,19 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
+            display->SetStatus(GetStatusTextByState());  // STANDBY
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
-            display->SetStatus(Lang::Strings::CONNECTING);
+            display->SetStatus(GetStatusTextByState());  // CONNECTING
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
-            display->SetStatus(Lang::Strings::LISTENING);
+            display->SetStatus(GetStatusTextByState());  // LISTENING
             display->SetEmotion("neutral");
 
             // Make sure the audio processor is running
@@ -1021,7 +1038,7 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
-            display->SetStatus(Lang::Strings::SPEAKING);
+            display->SetStatus(GetStatusTextByState());  // SPEAKING
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);

@@ -23,6 +23,11 @@ LvglDisplay::LvglDisplay() {
             DisplayLockGuard lock(display);
             lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+            // 通知结束:恢复为当前设备状态的真实文字,避免显示过时内容
+            const char* text = Application::GetInstance().GetStatusTextByState();
+            if (text != nullptr) {
+                lv_label_set_text(display->status_label_, text);
+            }
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -132,22 +137,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         }
     }
 
-    // Update time
-    if (app.GetDeviceState() == kDeviceStateIdle) {
-        if (last_status_update_time_ + std::chrono::seconds(10) < std::chrono::system_clock::now()) {
-            // Set status to clock "HH:MM"
-            time_t now = time(NULL);
-            struct tm* tm = localtime(&now);
-            // Check if the we have already set the time
-            if (tm->tm_year >= 2025 - 1900) {
-                char time_str[16];
-                strftime(time_str, sizeof(time_str), "%H:%M", tm);
-                SetStatus(time_str);
-            } else {
-                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
-            }
-        }
-    }
+    // 不再显示时钟:顶栏中间只显示状态文字(由状态机 SetStatus 维护)
 
     esp_pm_lock_acquire(pm_lock_);
     // Update battery icon
