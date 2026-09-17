@@ -1523,8 +1523,8 @@ private:
         const int SHAKE_PEAKS_TO_TRIGGER = 2;      // 1 秒内 2 个尖峰算摇晃
         const int64_t SHAKE_WINDOW_US = 1000 * 1000;
         const int LIFT_SAMPLES_TO_TRIGGER = 5;
-        const int STILL_SAMPLES_TO_REARM = 50;     // 5 秒静止才允许下次触发
-        const int64_t GLOBAL_COOLDOWN_US = 5 * 60 * 1000 * 1000LL;  // 触发后 5 分钟全局冷却
+        const int STILL_SAMPLES_TO_REARM = 20;     // 2 秒静止即可重新武装(原 5 秒太苛刻)
+        const int64_t GLOBAL_COOLDOWN_US = 2 * 60 * 1000 * 1000LL;  // 触发后 2 分钟全局冷却(原 5 分钟,提高响应频率)
 
         int lift_count = 0;
         int still_count = 0;
@@ -1574,13 +1574,14 @@ private:
                 still_count++;
                 if (still_count >= STILL_SAMPLES_TO_REARM) armed = true;
                 lift_count = 0;
-                for (int i = 0; i < 8; i++) shake_peak_times[i] = 0;
+                // 注：不再逐帧清空尖峰记录——短暂停顿会误杀正在累计的摇晃，
+                // 过期尖峰由 1 秒时间窗自然过滤
                 continue;
             }
 
             still_count = 0;
             if (!armed) continue;  // 已触发过，等静止 re-arm
-            // 全局冷却：上次触发后 5 分钟内任何情况都不再触发
+            // 全局冷却：上次触发后 2 分钟内任何情况都不再触发
             if (last_motion_trigger_us_ != 0 && (now - last_motion_trigger_us_) < GLOBAL_COOLDOWN_US) continue;
 
             // 摇晃检测：1 秒内累计 ≥3 个尖峰
