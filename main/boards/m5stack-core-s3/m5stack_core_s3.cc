@@ -124,6 +124,10 @@ public:
 
     bool IsAnimating() const { return anim_running_; }
 
+    // 诊断用: 读舵机原始位置(无应答返回 -1)
+    int ReadYawPos()   { return bus_.ReadPos(1); }
+    int ReadPitchPos() { return bus_.ReadPos(2); }
+
 private:
     static void IdleScanCb(void* arg) {
         auto* self = static_cast<StackChanServo*>(arg);
@@ -288,7 +292,7 @@ void StackChanServo::Nod() {
         tracker_ ? (int)tracker_->GetYaw() : 0,
         tracker_ ? (int)tracker_->GetPitch() : 30};
     if (tracker_) tracker_->Pause(false);
-    xTaskCreatePinnedToCore([](void* arg) {
+    BaseType_t ok = xTaskCreatePinnedToCore([](void* arg) {
         auto* c = static_cast<ServoAnimCtx*>(arg);
         auto* s = c->servo;
         int y = c->base_yaw, p = c->base_pitch;
@@ -304,7 +308,15 @@ void StackChanServo::Nod() {
         if (s->tracker_) s->tracker_->Resume();
         delete c;
         vTaskDelete(nullptr);
-    }, "nod", 2048, ctx, 2, nullptr, 1);
+    }, "nod", 3072, ctx, 2, nullptr, 1);
+    if (ok != pdPASS) {
+        // 任务创建失败必须复位: 否则 anim_running_ 卡在 true,
+        // 之后所有点头/摇头都会被 Nod() 开头的 if (anim_running_) return; 静默吞掉
+        anim_running_ = false;
+        delete ctx;
+        if (tracker_) tracker_->Resume();
+        ESP_LOGE("Servo", "nod 动画任务创建失败");
+    }
 }
 
 void StackChanServo::Shake() {
@@ -314,7 +326,7 @@ void StackChanServo::Shake() {
         tracker_ ? (int)tracker_->GetYaw() : 0,
         tracker_ ? (int)tracker_->GetPitch() : 30};
     if (tracker_) tracker_->Pause(false);
-    xTaskCreatePinnedToCore([](void* arg) {
+    BaseType_t ok = xTaskCreatePinnedToCore([](void* arg) {
         auto* c = static_cast<ServoAnimCtx*>(arg);
         auto* s = c->servo;
         int y = c->base_yaw, p = c->base_pitch;
@@ -330,7 +342,14 @@ void StackChanServo::Shake() {
         if (s->tracker_) s->tracker_->Resume();
         delete c;
         vTaskDelete(nullptr);
-    }, "shake", 2048, ctx, 2, nullptr, 1);
+    }, "shake", 3072, ctx, 2, nullptr, 1);
+    if (ok != pdPASS) {
+        // 同上: 失败必须复位 anim_running_
+        anim_running_ = false;
+        delete ctx;
+        if (tracker_) tracker_->Resume();
+        ESP_LOGE("Servo", "shake 动画任务创建失败");
+    }
 }
 
 void StackChanServo::Tilt() {
@@ -403,7 +422,8 @@ enum class Expression {
     Kissy, Cool, Confident,
     Shocked, Thinking, Surprised, Confused,
     Embarrassed, Silly, Winking, Laughing, Funny, Relaxed, Delicious,
-    Dizzy, Drool, StarEyes, Tongue, Yawn, Fuming
+    Dizzy, Drool, StarEyes, Tongue, Yawn, Fuming,
+    Glance          // 眼神示意: 斜眼提示"有情况"
 };
 
 struct Overlay {
@@ -488,6 +508,7 @@ private:
             case Expression::Shocked:
             case Expression::Winking:
             case Expression::Kissy:
+            case Expression::Glance:      // 眼神示意: 不眨眼, 保持"斜看"的语义
                 return false;
             default:
                 return true;
@@ -506,6 +527,7 @@ private:
             case Expression::Thinking:
             case Expression::Embarrassed:
             case Expression::Winking:
+            case Expression::Glance:      // 眼神示意: 固定斜视方向, 不要随机扫视
                 return false;
             default:
                 return true;
@@ -581,6 +603,7 @@ private:
         DrawMouth(&layer, fg, bg);
         DrawEye(&layer, fg, bg, false);
         DrawEye(&layer, fg, bg, true);
+        if (expression_ == Expression::Glance) DrawBrows(&layer, fg);
         DrawOverlay(&layer, fg, bg);
 
         lv_canvas_finish_layer(canvas_, &layer);
@@ -659,6 +682,12 @@ private:
         d.p1.x = (float)x1; d.p1.y = (float)y1;
         d.p2.x = (float)x2; d.p2.y = (float)y2;
         lv_draw_line(layer, &d);
+    }
+
+    // 眼神示意(Glance)专用图元: 两条眉毛 —— 睁眼侧高挑、眯眼侧微挑
+    void DrawBrows(lv_layer_t* layer, lv_color_t c) {
+        DrawLine(layer, 230 - 10, 96 - 18 + 6, 230 + 10, 96 - 18 - 6, 3, true, c);
+        DrawLine(layer,  90 - 10, 93 - 15 + 2,  90 + 10, 93 - 15 - 2, 3, true, c);
     }
 
     void DrawMouth(lv_layer_t* layer, lv_color_t fg, lv_color_t bg) {
@@ -758,6 +787,11 @@ private:
             case Expression::Fuming: {
                 // 生气: 下弯嘴
                 DrawArc(layer, cx, cy + y_off + 6, 12, 200, 340, 3, fg, false);
+                return;
+            }
+            case Expression::Glance: {
+                // 眼神示意: 单边含蓄笑(嘴角微挑)
+                DrawLine(layer, cx - 18, cy + y_off + 4, cx + 15, cy + y_off - 3, 3, true, fg);
                 return;
             }
             default: {
@@ -896,6 +930,17 @@ private:
             int h = r + 3;
             FillCircle(layer, cx_base + off_x, cy + off_y, (int)(r / 1.5f), bg);
             FillRect(layer, x0, y0, w, h, bg);
+            return;
+        }
+
+        if (expression_ == Expression::Glance) {
+            // 眼神示意(方案C): 一只眼斜看(黑瞳孔偏向一侧), 另一只眼眯成弧
+            if (is_left) {
+                FillCircle(layer, cx_base, cy, 10, fg);
+                FillCircle(layer, cx_base + 4, cy + 1, 4, bg);
+            } else {
+                DrawArc(layer, cx_base, cy - 1, 9, 200, 340, 3, fg, false);
+            }
             return;
         }
 
@@ -1089,6 +1134,7 @@ static Expression MapEmotion(const char* e) {
     if (!strcmp(e, "tongue"))      return Expression::Tongue;
     if (!strcmp(e, "yawn"))        return Expression::Yawn;
     if (!strcmp(e, "fuming"))      return Expression::Fuming;
+    if (!strcmp(e, "glance"))      return Expression::Glance;
     return Expression::Neutral;
 }
 
@@ -2119,8 +2165,11 @@ private:
                                " (请先学习该设备)";
                     }
                 }
-                face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
-                servo_.MoveTo(yaw, pitch, 400);
+                int _yaw = yaw, _pitch = pitch;
+                Application::GetInstance().Schedule([this, _yaw, _pitch]() {
+                    face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
+                    servo_.MoveTo(_yaw, _pitch, 400);
+                });
                 SchedulePanRestore();
                 return true;
             });
@@ -2273,7 +2322,10 @@ private:
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
-                        servo_.Nod();
+                        // 必须在主线程执行: MCP 回调跑在协议任务里, 直接写舵机总线不生效
+                        // (与 IR 反馈路径 HandleIrState 的做法一致)
+                        if (servo_.IsAnimating()) return std::string("busy: 上一个动作还没结束");
+                        Application::GetInstance().Schedule([this]() { servo_.Nod(); });
                         return true;
                     });
 
@@ -2284,7 +2336,8 @@ private:
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
-                        servo_.Shake();
+                        if (servo_.IsAnimating()) return std::string("busy: 上一个动作还没结束");
+                        Application::GetInstance().Schedule([this]() { servo_.Shake(); });
                         return true;
                     });
 
@@ -2295,10 +2348,32 @@ private:
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
-                        face_tracker_.Pause(false);  // 暂停跟随，让位归位
-                        servo_.Center();
+                        Application::GetInstance().Schedule([this]() {
+                            face_tracker_.Pause(false);  // 暂停跟随，让位归位
+                            servo_.Center();
+                        });
                         SchedulePanRestore();
                         return true;
+                    });
+
+        // self.get_servo_state —— 舵机诊断(远程排查): 读两路舵机是否应答
+        mcp.AddTool("self.get_servo_state",
+                    "Read the pan/tilt servo state. Returns raw position values; -1 means that "
+                    "servo did not answer (wiring or power problem). Use it to verify the servo "
+                    "bus before/after sending head actions.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        if (!servo_ok_) return std::string("servo not available (UART init failed)");
+                        int yaw = servo_.ReadYawPos();
+                        int pitch = servo_.ReadPitchPos();
+                        std::string msg = "yaw_pos=" + std::to_string(yaw) +
+                                          " pitch_pos=" + std::to_string(pitch);
+                        if (yaw < 0 || pitch < 0) {
+                            msg += " <- 无应答的那一路: 查舵机接线/供电(PY32 VM_EN)";
+                        } else if (servo_.IsAnimating()) {
+                            msg += " (动画进行中)";
+                        }
+                        return msg;
                     });
 
         // self.face.set_emotion —— 指定表情（SetEmotion 内部联动舵机动画 + 情绪灯）
@@ -2306,7 +2381,9 @@ private:
             "self.face.set_emotion",
             "Set the avatar facial expression. Valid values: happy, sad, angry, loving, "
             "thinking, winking, cool, relaxed, sleepy, surprised, laughing, funny, confused, "
-            "delicious, confident, embarrassed, silly, kissy, crying, shocked, neutral. "
+            "delicious, confident, embarrassed, silly, kissy, crying, shocked, neutral, "
+            "glance (a knowing sideways look — use it to hint that something needs the "
+            "user's attention). "
             "Also triggers a matching head animation and LED ring color.",
             PropertyList({Property("emotion", kPropertyTypeString)}),
             [this](const PropertyList& props) -> ReturnValue {
@@ -2315,7 +2392,7 @@ private:
                     "happy", "sad", "angry", "loving", "thinking", "winking", "cool",
                     "relaxed", "sleepy", "surprised", "laughing", "funny", "confused",
                     "delicious", "confident", "embarrassed", "silly", "kissy", "crying",
-                    "shocked", "neutral",
+                    "shocked", "neutral", "glance",
                 };
                 bool valid = false;
                 for (const char* v : kValid) {
@@ -2328,7 +2405,8 @@ private:
                     return std::string("invalid emotion: ") + emotion +
                            " (valid: happy, sad, angry, loving, thinking, winking, cool, "
                            "relaxed, sleepy, surprised, laughing, funny, confused, delicious, "
-                           "confident, embarrassed, silly, kissy, crying, shocked, neutral)";
+                           "confident, embarrassed, silly, kissy, crying, shocked, neutral, "
+                           "glance)";
                 }
                 if (display_ != nullptr) {
                     display_->SetEmotion(emotion.c_str());
