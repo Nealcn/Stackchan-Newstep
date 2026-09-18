@@ -127,6 +127,9 @@ public:
     // 诊断用: 读舵机原始位置(无应答返回 -1)
     int ReadYawPos()   { return bus_.ReadPos(1); }
     int ReadPitchPos() { return bus_.ReadPos(2); }
+    // 诊断用: Ping 指定 ID(应答返回 >=0, 无应答 -1), 用于扫总线
+    int PingServo(int id) { return bus_.Ping((u8)id); }
+    int ReadPosOf(int id) { return bus_.ReadPos(id); }
 
 private:
     static void IdleScanCb(void* arg) {
@@ -2374,6 +2377,33 @@ private:
                             msg += " (动画进行中)";
                         }
                         return msg;
+                    });
+
+        // self.servo_scan —— 扫描舵机总线: Ping 1~20 号, 报出哪些 ID 有响应
+        // 用途: "动作无反应 + 读不回"时一次分辨: 信号线坏 / ID 不是 1,2 / 波特率不对
+        mcp.AddTool("self.servo_scan",
+                    "Scan the servo bus: ping IDs 1..20 and report which servos answer (with "
+                    "their raw position). Use it when head actions do nothing. No ID answering "
+                    "= signal/wiring or baud problem; unexpected IDs answering = the firmware "
+                    "writes to the wrong servo IDs.",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        if (!servo_ok_) return std::string("servo not available (UART init failed)");
+                        std::string msg;
+                        int found = 0;
+                        for (int id = 1; id <= 20; id++) {
+                            if (servo_.PingServo(id) >= 0) {
+                                found++;
+                                msg += "id" + std::to_string(id) +
+                                       "(pos=" + std::to_string(servo_.ReadPosOf(id)) + ") ";
+                            }
+                        }
+                        if (found == 0) {
+                            return std::string("无任何舵机应答(id 1~20) | bus=UART1 tx=GPIO6 "
+                                               "rx=GPIO7 @1Mbps: 查信号线/舵机供电, 或舵机波特率不同");
+                        }
+                        return "应答 " + std::to_string(found) + " 个: " + msg +
+                               "| 固件当前写的是 id1(yaw)/id2(pitch)";
                     });
 
         // self.face.set_emotion —— 指定表情（SetEmotion 内部联动舵机动画 + 情绪灯）
