@@ -11,19 +11,19 @@ static const char *TAG = "SCSerial";
 
 SCSerial::SCSerial()
 {
-    IOTimeOut = 100;
+    IOTimeOut = 30;  // 1Mbps 下应答 <100µs, 30ms 已有 300x 余量; 缩短无应答时的阻塞/自旋
     uart_num  = UART_NUM_MAX;
 }
 
 SCSerial::SCSerial(u8 End) : SCS(End)
 {
-    IOTimeOut = 100;
+    IOTimeOut = 30;  // 1Mbps 下应答 <100µs, 30ms 已有 300x 余量; 缩短无应答时的阻塞/自旋
     uart_num  = UART_NUM_MAX;
 }
 
 SCSerial::SCSerial(u8 End, u8 Level) : SCS(End, Level)
 {
-    IOTimeOut = 100;
+    IOTimeOut = 30;  // 1Mbps 下应答 <100µs, 30ms 已有 300x 余量; 缩短无应答时的阻塞/自旋
     uart_num  = UART_NUM_MAX;
 }
 

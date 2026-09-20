@@ -29,6 +29,8 @@
 #include "esp_sntp.h"
 #include "esp_video.h"
 #include "lvgl.h"
+#include <mutex>       // std::mutex: 舵机动画/总线互斥
+#include <functional>
 #include "SCSCL.h"
 #include "i2c_bus.h"
 #include "bmi270_api.h"
@@ -67,6 +69,9 @@ static void Bmi270DelayUs(uint32_t period_us, void *intf_ptr) {
 
 class FaceTracker;
 
+// 头部动作类型: RequestAction 的排队单位(诊断编号 0=无 1=nod 2=shake 3=tilt)
+enum class HeadAction { kNone = 0, kNod, kShake, kTilt };
+
 class StackChanServo {
 public:
     bool Begin() {
@@ -84,7 +89,7 @@ public:
         args.name = "servo_idle";
         args.skip_unhandled_events = true;
         esp_timer_create(&args, &idle_timer_);
-        esp_timer_start_periodic(idle_timer_, 15000000);  // 待机扫视间隔 15s（调慢）
+        esp_timer_start_periodic(idle_timer_, 4000000);  // 待机扫视间隔 4s（恢复基线节奏）
         scan_running_ = true;
         return true;
     }
@@ -96,8 +101,23 @@ public:
         if (pitch_deg > 60) pitch_deg = 60;
         int yaw_pos = 460 + yaw_deg * 16 / 5;
         int pitch_pos = 620 + pitch_deg * 16 / 5;
-        bus_.WritePos(1, yaw_pos, time_ms, 0);
-        bus_.WritePos(2, pitch_pos, time_ms, 0);
+        // 互斥: 动画任务/人脸跟随/待机扫视 三条并发写者, 无锁会导致串口帧交错→舵机丢包
+        std::lock_guard<std::mutex> lk(bus_mtx_);
+        int r1 = bus_.WritePos(1, yaw_pos, time_ms, 0);
+        int r2 = bus_.WritePos(2, pitch_pos, time_ms, 0);
+        if (r1 <= 0 || r2 <= 0) {
+            // 限流告警(3s): 指令发出但无应答 = 舵机未上电/接线/ID/波特率问题
+            static int64_t last_warn_us = 0;
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_warn_us > 3000000LL) {
+                last_warn_us = now_us;
+                ESP_LOGW("Servo", "[bus] MoveTo 无应答 yaw=%d pitch=%d (r=%d,%d)", yaw_deg,
+                         pitch_deg, r1, r2);
+            }
+        }
+        // 记录最后一次实际下发的位置, 供动画取基准(避免用陈旧的 tracker 值把脑袋拽回)
+        last_yaw_ = yaw_deg;
+        last_pitch_ = pitch_deg;
     }
 
     void PauseScan() {
@@ -109,7 +129,7 @@ public:
 
     void ResumeScan() {
         if (!scan_running_ && idle_timer_) {
-            esp_timer_start_periodic(idle_timer_, 15000000);  // 待机扫视间隔 15s（调慢）
+            esp_timer_start_periodic(idle_timer_, 4000000);  // 待机扫视间隔 4s（恢复基线节奏）
             scan_running_ = true;
         }
     }
@@ -118,32 +138,94 @@ public:
 
     void SetFaceTracker(FaceTracker* ft) { tracker_ = ft; }
 
-    void Nod();
-    void Shake();
-    void Tilt();
+    void Nod()   { RequestAction(HeadAction::kNod); }
+    void Shake() { RequestAction(HeadAction::kShake); }
+    void Tilt()  { RequestAction(HeadAction::kTilt); }
 
     bool IsAnimating() const { return anim_running_; }
+    // 诊断: 当前动作/排队动作(0=无 1=nod 2=shake 3=tilt), 供 self.get_servo_state
+    int CurrentAction() const { return (int)anim_action_; }
+    int PendingAction() const { return (int)pending_action_; }
 
-    // 诊断用: 读舵机原始位置(无应答返回 -1)
-    int ReadYawPos()   { return bus_.ReadPos(1); }
-    int ReadPitchPos() { return bus_.ReadPos(2); }
+    // 动画收尾钩子(由 board 注入 RestoreFaceTracker, 按设备状态恢复跟随/扫视);
+    // 仅允许构造期注入一次——动画任务在 core1 读取, 运行期改会数据竞争
+    void SetAnimDoneHook(std::function<void()> fn) { on_anim_done_ = std::move(fn); }
+
+    // 诊断用: 读舵机原始位置(无应答返回 -1)。每事务加锁(不跨 vTaskDelay)
+    int ReadYawPos()   { std::lock_guard<std::mutex> lk(bus_mtx_); return bus_.ReadPos(1); }
+    int ReadPitchPos() { std::lock_guard<std::mutex> lk(bus_mtx_); return bus_.ReadPos(2); }
     // 诊断用: Ping 指定 ID(应答返回 >=0, 无应答 -1), 用于扫总线
-    int PingServo(int id) { return bus_.Ping((u8)id); }
-    int ReadPosOf(int id) { return bus_.ReadPos(id); }
+    int PingServo(int id) { std::lock_guard<std::mutex> lk(bus_mtx_); return bus_.Ping((u8)id); }
+    int ReadPosOf(int id) { std::lock_guard<std::mutex> lk(bus_mtx_); return bus_.ReadPos(id); }
 
 private:
     static void IdleScanCb(void* arg) {
         auto* self = static_cast<StackChanServo*>(arg);
-        int yaw = (rand() % 51) - 25;
-        int pitch = 25 + (rand() % 11);
-        self->MoveTo(yaw, pitch, 4000);  // 扫视动作 4s 走完（调慢更柔和）
+        // 定时器回调与 20ms 触摸轮询共用 esp_timer 任务: 不在这里做 UART I/O(会连带延迟触摸),
+        // 投递到主线程执行
+        Application::GetInstance().Schedule([self]() {
+            if (!self->scan_running_ || self->anim_running_) return;  // 动画/暂停中跳过
+            int yaw = (rand() % 51) - 25;
+            int pitch = 25 + (rand() % 11);
+            ESP_LOGI("Servo", "[scan] 待机扫视 yaw=%d pitch=%d", yaw, pitch);
+            self->MoveTo(yaw, pitch, 1500);  // 扫视动作 1.5s 走完（恢复基线）
+        });
     }
+
+    // 请求一次头部动作: 忙则同动作去重、异动作记 pending(动画结束后补做一次)。
+    // pending 与闩锁复位必须同临界区, 否则补做动作会被永久搁浅
+    void RequestAction(HeadAction a) {
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> lk(anim_mtx_);
+            if (anim_running_) {
+                if (a != anim_action_ && a != pending_action_) {
+                    pending_action_ = a;
+                    ESP_LOGI("Servo", "[anim] 忙(%d) → 动作 %d 排队补做", (int)anim_action_, (int)a);
+                } else {
+                    ESP_LOGI("Servo", "[anim] 忙(%d) → 忽略重复动作 %d", (int)anim_action_, (int)a);
+                }
+            } else {
+                anim_running_ = true;
+                anim_action_ = a;
+                start = true;
+            }
+        }
+        if (!start) return;
+        ESP_LOGI("Servo", "[anim] start %d", (int)a);
+        // 锁外建任务(xTaskCreate 会分配内存/可能阻塞)
+        if (xTaskCreatePinnedToCore(AnimTaskFunc, "servo_anim", 3072, this, 2, nullptr, 1) != pdPASS) {
+            {
+                std::lock_guard<std::mutex> lk(anim_mtx_);
+                anim_running_ = false;
+                anim_action_ = HeadAction::kNone;
+                pending_action_ = HeadAction::kNone;
+            }
+            ESP_LOGE("Servo", "[anim] 动画任务创建失败, 闩锁已复位");
+            OnAnimDone();  // 失败路径同样恢复跟随/扫视
+        }
+    }
+
+    static void AnimTaskFunc(void* arg) {
+        static_cast<StackChanServo*>(arg)->RunAnimLoop();
+        vTaskDelete(nullptr);
+    }
+
+    // 这两个函数需要 FaceTracker 的完整类型, 定义放在 FaceTracker 类之后(类外)
+    void RunAnimLoop();
+    void OnAnimDone();
 
     SCSCL bus_;
     esp_timer_handle_t idle_timer_ = nullptr;
     FaceTracker* tracker_ = nullptr;
     bool scan_running_ = false;
-    volatile bool anim_running_ = false;
+    volatile bool anim_running_ = false;             // IsAnimating() 无锁读
+    HeadAction anim_action_ = HeadAction::kNone;     // anim_mtx_ 保护
+    HeadAction pending_action_ = HeadAction::kNone;  // anim_mtx_ 保护
+    std::mutex anim_mtx_;  // 仅保护闩锁/排队字段, 绝不跨 MoveTo/vTaskDelay
+    std::mutex bus_mtx_;   // 仅保护单次 SCS 事务
+    int last_yaw_ = 0, last_pitch_ = 30;             // MoveTo 更新, 供动画取基准
+    std::function<void()> on_anim_done_;
 };
 
 class FaceTracker {
@@ -165,7 +247,7 @@ public:
         if (!paused_) {
             paused_ = true;
             tracking_ = false;
-            if (resume_scan) servo_->ResumeScan();
+            if (resume_scan && servo_) servo_->ResumeScan();
             ESP_LOGI("FaceTrack", "Paused (scan=%d)", resume_scan);
         }
     }
@@ -174,7 +256,7 @@ public:
         if (paused_) {
             paused_ = false;
             has_prev_ = false;
-            servo_->PauseScan();
+            if (servo_) servo_->PauseScan();  // 未 Start(servo_ 为空)时不能被解引用
             ESP_LOGI("FaceTrack", "Resumed");
         }
     }
@@ -271,7 +353,9 @@ private:
     EspVideo* camera_ = nullptr;
     StackChanServo* servo_ = nullptr;
     TaskHandle_t task_ = nullptr;
-    volatile bool paused_ = false;
+    // 默认 true: "未 Start == 已暂停"。默认 false 时 RestoreFaceTracker/SetStatus 的
+    // Pause() 会走到 servo_->ResumeScan(), 摄像头不可用(未 Start, servo_ 为空)时直接空指针崩溃
+    volatile bool paused_ = true;
     bool tracking_ = false;
     bool has_prev_ = false;
     int no_move_count_ = 0;
@@ -282,100 +366,57 @@ private:
     uint8_t prev_frame_[DS_W * DS_H];
 };
 
-struct ServoAnimCtx {
-    StackChanServo* servo;
-    int base_yaw;
-    int base_pitch;
-};
+// Nod/Shake/Tilt 的实现已内联到 StackChanServo::RequestAction/RunAnimLoop:
+// 排队补做 + 同动作去重 + 闩锁失败复位 + 按设备状态恢复跟随(经 SetAnimDoneHook)
 
-void StackChanServo::Nod() {
-    if (anim_running_) return;
-    anim_running_ = true;
-    auto* ctx = new ServoAnimCtx{this,
-        tracker_ ? (int)tracker_->GetYaw() : 0,
-        tracker_ ? (int)tracker_->GetPitch() : 30};
-    if (tracker_) tracker_->Pause(false);
-    BaseType_t ok = xTaskCreatePinnedToCore([](void* arg) {
-        auto* c = static_cast<ServoAnimCtx*>(arg);
-        auto* s = c->servo;
-        int y = c->base_yaw, p = c->base_pitch;
-        s->MoveTo(y, p - 10, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y, p + 5, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y, p - 8, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y, p, 300);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        s->anim_running_ = false;
-        if (s->tracker_) s->tracker_->Resume();
-        delete c;
-        vTaskDelete(nullptr);
-    }, "nod", 3072, ctx, 2, nullptr, 1);
-    if (ok != pdPASS) {
-        // 任务创建失败必须复位: 否则 anim_running_ 卡在 true,
-        // 之后所有点头/摇头都会被 Nod() 开头的 if (anim_running_) return; 静默吞掉
-        anim_running_ = false;
-        delete ctx;
-        if (tracker_) tracker_->Resume();
-        ESP_LOGE("Servo", "nod 动画任务创建失败");
+void StackChanServo::RunAnimLoop() {
+    HeadAction a = anim_action_;
+    if (tracker_) tracker_->Pause(false);  // 让位动画(不恢复扫视)
+    PauseScan();                           // 动画期间停待机扫视, 防止 15s 扫视抢舵机
+    for (;;) {
+        int y = last_yaw_, p = last_pitch_;  // 基准在执行时取, 排队补做不会用过期基准
+        if (a == HeadAction::kNod) {
+            MoveTo(y, p - 10, 200); vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y, p + 5, 200);  vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y, p - 8, 200);  vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y, p, 300);      vTaskDelay(pdMS_TO_TICKS(300));
+        } else if (a == HeadAction::kShake) {
+            MoveTo(y - 15, p, 200); vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y + 15, p, 200); vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y - 10, p, 200); vTaskDelay(pdMS_TO_TICKS(250));
+            MoveTo(y, p, 300);      vTaskDelay(pdMS_TO_TICKS(300));
+        } else {  // kTilt
+            MoveTo(y + 10, p - 10, 400); vTaskDelay(pdMS_TO_TICKS(1500));
+            MoveTo(y, p, 500);           vTaskDelay(pdMS_TO_TICKS(500));
+        }
+
+        HeadAction next;
+        {
+            std::lock_guard<std::mutex> lk(anim_mtx_);
+            if (pending_action_ != HeadAction::kNone) {
+                next = pending_action_;
+                pending_action_ = HeadAction::kNone;
+                anim_action_ = next;    // 连锁动作: 闩锁保持 true
+            } else {
+                anim_action_ = HeadAction::kNone;
+                anim_running_ = false;  // 与"清 pending"同一临界区
+                next = HeadAction::kNone;
+            }
+        }
+        if (next == HeadAction::kNone) break;
+        a = next;  // 连锁动作之间不恢复跟随/扫视(否则扫视被重启会抢舵机)
+        ESP_LOGI("Servo", "[anim] 接续动作 %d", (int)a);
     }
+    ESP_LOGI("Servo", "[anim] end");
+    OnAnimDone();  // 锁外调用
 }
 
-void StackChanServo::Shake() {
-    if (anim_running_) return;
-    anim_running_ = true;
-    auto* ctx = new ServoAnimCtx{this,
-        tracker_ ? (int)tracker_->GetYaw() : 0,
-        tracker_ ? (int)tracker_->GetPitch() : 30};
-    if (tracker_) tracker_->Pause(false);
-    BaseType_t ok = xTaskCreatePinnedToCore([](void* arg) {
-        auto* c = static_cast<ServoAnimCtx*>(arg);
-        auto* s = c->servo;
-        int y = c->base_yaw, p = c->base_pitch;
-        s->MoveTo(y - 15, p, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y + 15, p, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y - 10, p, 200);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        s->MoveTo(y, p, 300);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        s->anim_running_ = false;
-        if (s->tracker_) s->tracker_->Resume();
-        delete c;
-        vTaskDelete(nullptr);
-    }, "shake", 3072, ctx, 2, nullptr, 1);
-    if (ok != pdPASS) {
-        // 同上: 失败必须复位 anim_running_
-        anim_running_ = false;
-        delete ctx;
-        if (tracker_) tracker_->Resume();
-        ESP_LOGE("Servo", "shake 动画任务创建失败");
-    }
+void StackChanServo::OnAnimDone() {
+    if (on_anim_done_) { on_anim_done_(); return; }  // board 注入: 按设备状态恢复
+    if (tracker_) { tracker_->Resume(); return; }    // 未注入 hook: 保持旧行为
+    ResumeScan();
 }
 
-void StackChanServo::Tilt() {
-    if (anim_running_) return;
-    anim_running_ = true;
-    auto* ctx = new ServoAnimCtx{this,
-        tracker_ ? (int)tracker_->GetYaw() : 0,
-        tracker_ ? (int)tracker_->GetPitch() : 30};
-    if (tracker_) tracker_->Pause(false);
-    xTaskCreatePinnedToCore([](void* arg) {
-        auto* c = static_cast<ServoAnimCtx*>(arg);
-        auto* s = c->servo;
-        int y = c->base_yaw, p = c->base_pitch;
-        s->MoveTo(y + 10, p - 10, 400);
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        s->MoveTo(y, p, 500);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        s->anim_running_ = false;
-        if (s->tracker_) s->tracker_->Resume();
-        delete c;
-        vTaskDelete(nullptr);
-    }, "tilt", 2048, ctx, 2, nullptr, 1);
-}
 
 static bool EnableServoPowerViaPy32(i2c_master_bus_handle_t i2c_bus) {
     i2c_device_config_t dev_cfg = {
@@ -392,6 +433,28 @@ static bool EnableServoPowerViaPy32(i2c_master_bus_handle_t i2c_bus) {
         return false;
     }
 
+    // 写使能位并回读校验；旧实现忽略三次写返回值 → 可能 servo_ok_=true 但 VM_EN 没生效(假成功)
+    auto set_bit0 = [&](uint8_t reg, const char* what) -> bool {
+        uint8_t v = 0;
+        if (i2c_master_transmit_receive(dev, &reg, 1, &v, 1, 200) != ESP_OK) {
+            ESP_LOGW(TAG, "PY32 %s 读失败", what);
+            return false;
+        }
+        if (v & 0x01) return true;  // 已使能
+        uint8_t buf[2] = {reg, (uint8_t)(v | 0x01)};
+        if (i2c_master_transmit(dev, buf, 2, 200) != ESP_OK) {
+            ESP_LOGW(TAG, "PY32 %s 写失败", what);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+        v = 0;
+        if (i2c_master_transmit_receive(dev, &reg, 1, &v, 1, 200) != ESP_OK || !(v & 0x01)) {
+            ESP_LOGW(TAG, "PY32 %s 回读未生效", what);
+            return false;
+        }
+        return true;
+    };
+
     for (int i = 0; i < 10; i++) {
         vTaskDelay(pdMS_TO_TICKS(200));
         uint8_t reg = 0x02;
@@ -399,15 +462,14 @@ static bool EnableServoPowerViaPy32(i2c_master_bus_handle_t i2c_bus) {
         err = i2c_master_transmit_receive(dev, &reg, 1, &ver, 1, 200);
         if (err == ESP_OK && ver != 0 && ver != 0xFF) {
             ESP_LOGI(TAG, "PY32 found! version=%d, enabling VM_EN", ver);
-            uint8_t buf[2];
-            reg = 0x03; i2c_master_transmit_receive(dev, &reg, 1, &buf[1], 1, 200);
-            buf[0] = 0x03; buf[1] |= 0x01; i2c_master_transmit(dev, buf, 2, 200);
-            reg = 0x09; i2c_master_transmit_receive(dev, &reg, 1, &buf[1], 1, 200);
-            buf[0] = 0x09; buf[1] |= 0x01; i2c_master_transmit(dev, buf, 2, 200);
-            reg = 0x05; i2c_master_transmit_receive(dev, &reg, 1, &buf[1], 1, 200);
-            buf[0] = 0x05; buf[1] |= 0x01; i2c_master_transmit(dev, buf, 2, 200);
-            ESP_LOGI(TAG, "Servo power enabled (VM_EN)");
-            return true;
+            bool ok = set_bit0(0x03, "VM_EN") & set_bit0(0x09, "VM_EN2") & set_bit0(0x05, "VM_EN3");
+            i2c_master_bus_rm_device(dev);
+            if (ok) {
+                ESP_LOGI(TAG, "Servo power enabled (VM_EN)");
+                return true;
+            }
+            ESP_LOGW(TAG, "PY32 VM_EN 回读未生效, 视为未使能");
+            return false;  // 写没生效就不能让 servo_ok_ 变 true
         }
         ESP_LOGD(TAG, "PY32 attempt %d: err=%s ver=0x%02X", i, esp_err_to_name(err), ver);
     }
@@ -1200,11 +1262,32 @@ public:
         avatar_.SetOverlay(o);
         SetActiveLocked(true);
         BumpIdleTimerLocked();
-        if (servo_) servo_->Tilt();
+        if (servo_) {
+            // PollTouchpad/si12t 跑在非主线程: 舵机动作统一排到主线程, 与表情/IR 路径共用同一队列
+            Application::GetInstance().Schedule([this]() { if (servo_) servo_->Tilt(); });
+        }
     }
 
     void SetEmotion(const char* emotion) override {
         SpiLcdDisplay::SetEmotion(emotion);
+        // 头部动作与情绪灯不再受 avatar 就绪状态影响: avatar 首帧需 153KB PSRAM,
+        // 分配失败会每 500ms 重试且可能整轮开机不就绪, 原来会把表情驱动的点头/摇头整段丢弃。
+        // 本函数可能来自 WS 协议任务/esp_timer 任务/主线程 → 舵机动作统一排到主线程串行化
+        if (servo_ && emotion) {
+            std::string e = emotion;  // 必须拷贝: emotion 常指向调用方的临时缓冲
+            Application::GetInstance().Schedule([this, e]() {
+                if (!servo_) return;
+                if (e == "happy" || e == "loving" || e == "laughing" ||
+                    e == "confident" || e == "winking" || e == "delicious") {
+                    servo_->Nod();
+                } else if (e == "sad" || e == "confused" ||
+                           e == "angry" || e == "shocked") {
+                    servo_->Shake();
+                }
+            });
+        }
+        // 情绪灯联动（与 SetStatus 对齐：不被 avatar 就绪状态挡住）
+        if (led_updater_) led_updater_(emotion);
         DisplayLockGuard lock(this);
         HideEmojiBoxLocked();
         if (!avatar_.IsReady()) return;
@@ -1215,19 +1298,6 @@ public:
             if (face_tracker_) face_tracker_->Pause(false);
             if (servo_) servo_->PauseScan();
         }
-        // 非 sleepy 不再无条件 Resume face_tracker——它现在跟设备状态走，由 SetStatus 控制
-        if (servo_ && emotion && !servo_->IsAnimating()) {
-            if (!strcmp(emotion, "happy") || !strcmp(emotion, "loving") ||
-                !strcmp(emotion, "laughing") || !strcmp(emotion, "confident") ||
-                !strcmp(emotion, "winking") || !strcmp(emotion, "delicious")) {
-                servo_->Nod();
-            } else if (!strcmp(emotion, "sad") || !strcmp(emotion, "confused") ||
-                       !strcmp(emotion, "angry") || !strcmp(emotion, "shocked")) {
-                servo_->Shake();
-            }
-        }
-        // 情绪灯联动
-        if (led_updater_) led_updater_(emotion);
     }
 
     void SetPreviewImage(std::unique_ptr<LvglImage> image) override {
@@ -1261,14 +1331,15 @@ public:
         SpiLcdDisplay::SetStatus(status);
         // 灯光随状态变化——LED 独立于表情画布，avatar 未就绪也要亮
         if (led_updater_) led_updater_("");
-        if (!status || !avatar_.IsReady()) return;
-        DisplayLockGuard lock(this);
+        // 跟随/暂停跟设备状态走，与 avatar 就绪无关（否则 avatar 未就绪时聆听也不跟随）
         auto state = Application::GetInstance().GetDeviceState();
         if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
             if (face_tracker_) face_tracker_->Resume();
         } else if (state == kDeviceStateIdle) {
             if (face_tracker_) face_tracker_->Pause();
         }
+        if (!status || !avatar_.IsReady()) return;
+        DisplayLockGuard lock(this);
         bool is_active = (strstr(status, "聆听")
                        || strstr(status, "说话")
                        || strstr(status, "思考")
@@ -1490,6 +1561,8 @@ private:
     bool servo_ok_ = false;
     bool low_batt_warned_ = false;
     bool exit_sleep_pending_ = false;
+    bool face_tracker_started_ = false;   // 人脸跟随是否已 Start(未 Start 时 RestoreFaceTracker 不能操作 tracker)
+    bool power_save_sleeping_ = false;    // 省电休眠中: 动画收尾不恢复待机扫视(否则黑屏下乱动)
     int64_t wakeup_grace_until_ms_ = 0;  // 唤醒后触摸抑制期的截止时间戳（ms）
     // ---- 触摸状态机（成员变量，替代 PollTouchpad 内的 static 局部）----
     bool was_touched_ = false;
@@ -1959,14 +2032,20 @@ private:
     }
 
     // ---- 红外模块集成（本项目新增：P3.1）----
-    // 恢复人脸跟随：遵循基线 SetStatus 的语义——仅 Listening/Speaking 时跟随，
-    // Idle 保持暂停（含待机扫视）。避免发码/转向结束后破坏对话状态的暂停逻辑。
+    // 按设备状态恢复"跟随/待机扫视"。幂等：动画收尾 / RS-4 定时器 / IR 挂钩可反复调用。
+    // 只读状态机 + 操作 FaceTracker/esp_timer；禁止触碰 display/LVGL（动画任务不持显示锁）
     void RestoreFaceTracker() {
         auto state = Application::GetInstance().GetDeviceState();
+        if (!face_tracker_started_) {
+            // 无人脸跟随(摄像头不可用/舵机未就绪): 只按需恢复待机扫视
+            if (servo_ok_ && !power_save_sleeping_) servo_.ResumeScan();
+            return;
+        }
         if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
-            face_tracker_.Resume();
+            face_tracker_.Resume();          // 内部会 PauseScan()
         } else {
-            face_tracker_.Pause();
+            face_tracker_.Pause(false);      // 已暂停时为 no-op, 故下面显式恢复扫视
+            if (servo_ok_ && !power_save_sleeping_) servo_.ResumeScan();
         }
     }
 
@@ -2326,8 +2405,9 @@ private:
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
                         // 必须在主线程执行: MCP 回调跑在协议任务里, 直接写舵机总线不生效
-                        // (与 IR 反馈路径 HandleIrState 的做法一致)
-                        if (servo_.IsAnimating()) return std::string("busy: 上一个动作还没结束");
+                        // (与 IR 反馈路径 HandleIrState 的做法一致)。
+                        // 不再做 IsAnimating 预检: 预检跑在 WS 任务、动作在主线程执行(TOCTOU),
+                        // 命中时回 "busy" 等于把用户指令丢掉; 忙/排队由 servo_ 层统一处理
                         Application::GetInstance().Schedule([this]() { servo_.Nod(); });
                         return true;
                     });
@@ -2339,7 +2419,7 @@ private:
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
-                        if (servo_.IsAnimating()) return std::string("busy: 上一个动作还没结束");
+                        // 去掉 IsAnimating 预检(TOCTOU, 见 nod 工具注释); 动作由 servo_ 排队
                         Application::GetInstance().Schedule([this]() { servo_.Shake(); });
                         return true;
                     });
@@ -2373,9 +2453,12 @@ private:
                                           " pitch_pos=" + std::to_string(pitch);
                         if (yaw < 0 || pitch < 0) {
                             msg += " <- 无应答的那一路: 查舵机接线/供电(PY32 VM_EN)";
-                        } else if (servo_.IsAnimating()) {
-                            msg += " (动画进行中)";
+                        } else {
+                            msg += " (anim=" + std::to_string(servo_.CurrentAction()) +
+                                   " pending=" + std::to_string(servo_.PendingAction()) +
+                                   "; 0=无 1=nod 2=shake 3=tilt)";
                         }
+                        ESP_LOGI(TAG, "[mcp] get_servo_state -> %s", msg.c_str());
                         return msg;
                     });
 
@@ -2399,9 +2482,11 @@ private:
                             }
                         }
                         if (found == 0) {
+                            ESP_LOGW(TAG, "[mcp] servo_scan: 无任何舵机应答(id 1~20)");
                             return std::string("无任何舵机应答(id 1~20) | bus=UART1 tx=GPIO6 "
                                                "rx=GPIO7 @1Mbps: 查信号线/舵机供电, 或舵机波特率不同");
                         }
+                        ESP_LOGI(TAG, "[mcp] servo_scan: 应答 %d 个: %s", found, msg.c_str());
                         return "应答 " + std::to_string(found) + " 个: " + msg +
                                "| 固件当前写的是 id1(yaw)/id2(pitch)";
                     });
@@ -2508,6 +2593,7 @@ private:
         // 因此此时 servo_/pmic_/py32_dev_ 尚未初始化是安全的
         power_save_timer_->OnEnterSleepMode([this]() {
             if (!pmic_) return;  // 防止 pmic_ 未初始化
+            power_save_sleeping_ = true;  // 动画收尾不恢复待机扫视
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(50);
             if (servo_ok_) servo_.PauseScan();
@@ -2531,6 +2617,7 @@ private:
             wakeup_grace_until_ms_ = (esp_timer_get_time() / 1000) + 2000;
             // 阻塞 I2C/UART 操作（LED恢复、背光、舵机、显示）推迟到主循环处理
             Application::GetInstance().Schedule([this]() {
+                power_save_sleeping_ = false;
                 GetDisplay()->SetPowerSaveMode(false);
                 GetBacklight()->RestoreBrightness();
                 if (servo_ok_) servo_.ResumeScan();
@@ -2546,6 +2633,42 @@ private:
         power_save_timer_->OnShutdownRequest([this]() {
         });
         power_save_timer_->SetEnabled(true);
+    }
+
+    static void ServoRecoveryTaskFunc(void* arg) {
+        static_cast<M5StackCoreS3Board*>(arg)->ServoRecoveryLoop();
+        vTaskDelete(nullptr);
+    }
+
+    // PY32 探测/使能失败的兜底恢复: 有界重试并补齐接线(避免"这次开机舵机全废")
+    void ServoRecoveryLoop() {
+        for (int attempt = 1; attempt <= 5 && !servo_ok_; attempt++) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            ESP_LOGW(TAG, "[boot] 舵机恢复重试 %d/5 ...", attempt);
+            py32_found_ = EnableServoPowerViaPy32(i2c_bus_);
+            if (!py32_found_) continue;
+            vTaskDelay(pdMS_TO_TICKS(200));
+            if (!servo_.Begin()) {
+                ESP_LOGE(TAG, "[boot] 舵机恢复: SCS bus begin 失败");
+                continue;
+            }
+            servo_ok_ = true;
+            auto* avatar_display = static_cast<M5StackAvatarDisplay*>(display_);
+            if (avatar_display != nullptr) avatar_display->SetServo(&servo_);
+            if (camera_ && camera_->IsOk()) {
+                face_tracker_.Start(camera_, &servo_);
+                face_tracker_started_ = true;
+                servo_.SetFaceTracker(&face_tracker_);
+                if (avatar_display != nullptr) avatar_display->SetFaceTracker(&face_tracker_);
+            }
+            servo_.SetAnimDoneHook([this]() { RestoreFaceTracker(); });
+            InitializePy32LedDevice();
+            RegisterLedMcpTools();  // 仅"开机即失败"的分支会走到, 不会重复注册
+            ESP_LOGW(TAG, "[boot] 舵机恢复成功, 动作可用");
+            servo_.Nod();           // 可见确认
+            return;
+        }
+        ESP_LOGE(TAG, "[boot] 舵机恢复失败: 本次开机舵机不可用");
     }
 
     void InitializeI2c() {
@@ -2931,8 +3054,13 @@ public:
         }
         if (camera_ && camera_->IsOk() && servo_ok_) {
             face_tracker_.Start(camera_, &servo_);
+            face_tracker_started_ = true;
             servo_.SetFaceTracker(&face_tracker_);
+            servo_.SetAnimDoneHook([this]() { RestoreFaceTracker(); });  // 动画收尾按状态恢复
             avatar_display->SetFaceTracker(&face_tracker_);
+        } else if (servo_ok_) {
+            // 无人脸跟随也要注入收尾钩子: 动画结束后恢复待机扫视
+            servo_.SetAnimDoneHook([this]() { RestoreFaceTracker(); });
         }
         avatar_display->SetLedUpdater([this](const char* emotion) {
             (void)emotion;  // no longer used - LED follows device state
@@ -2965,6 +3093,12 @@ public:
         InitializeBmi270();
         InitializeSi12T();
         InitializeMorningGreeting();
+
+        // PY32 上电晚/首次探测失败 → servo_ok_=false → 整轮开机舵机动作全失效。
+        // 有界后台重试(2s 间隔 ×5), 成功后补齐舵机/跟随/显示的全部接线
+        if (!servo_ok_) {
+            xTaskCreatePinnedToCore(ServoRecoveryTaskFunc, "servo_recover", 3072, this, 2, nullptr, 1);
+        }
 
         esp_timer_create_args_t status_args = {};
         status_args.callback = [](void* arg) {
