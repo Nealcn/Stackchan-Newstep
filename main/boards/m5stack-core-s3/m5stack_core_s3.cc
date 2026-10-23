@@ -8,9 +8,6 @@
 #include "axp2101.h"
 #include "mcp_server.h"
 #include "settings.h"
-#include "ir/ir_service.h"
-#include "ir/ir_config.h"
-#include "ir_remote_screen.h"
 #include "sd/sd_card.h"
 #include "sd/sd_photo.h"
 #include <esp_lvgl_port.h>
@@ -1612,20 +1609,9 @@ private:
     bool pet_triggered_ = false;
     bool pending_single_release_ = false;
     int64_t pending_single_release_time_ = 0;
-    // ---- 红外模块（本项目新增）----
-    stackchan_ir::IrDriver ir_driver_;
-    stackchan_ir::IrStore ir_store_;
-    stackchan_ir::IrService ir_service_;
-    esp_timer_handle_t pan_restore_timer_ = nullptr;  // RS-4：联动转向后恢复人脸跟随
-    esp_timer_handle_t led_flash_timer_ = nullptr;    // FR-08：LED 反馈闪烁定时器
-    IrRemoteScreen ir_remote_screen_;
-    bool remote_screen_open_ = false;  // 遥控屏打开标志（触控语义让渡，RS-3）
+    esp_timer_handle_t pan_restore_timer_ = nullptr;  // 云台转向后恢复人脸跟随
     // ---- SD 卡（TF，SPI 模式，与 LCD 共用 SPI3 总线）----
     stackchan_sd::SdCard sd_card_;
-    // ---- 语音学习（异步 MCP self.ir.learn_start）上下文 ----
-    std::string ir_learn_device_;  // 学习目标设备名（不存在则自动创建）
-    std::string ir_learn_key_;     // 学习中按键
-    bool ir_learn_voice_ = false;  // true=语音学习（状态监听器负责保存+异步回复）
 
     // ---- 交互灵敏度配置：NVS 读写（Settings 局部作用域，析构时 commit）----
     void LoadBehaviorCfg() {
@@ -2210,8 +2196,8 @@ private:
             });
     }
 
-    // ---- 红外模块集成（本项目新增：P3.1）----
-    // 按设备状态恢复"跟随/待机扫视"。幂等：动画收尾 / RS-4 定时器 / IR 挂钩可反复调用。
+    // ---- 人脸跟随/待机扫视恢复 ----
+    // 按设备状态恢复"跟随/待机扫视"。幂等：动画收尾 / RS-4 定时器可反复调用。
     // 只读状态机 + 操作 FaceTracker/esp_timer；禁止触碰 display/LVGL（动画任务不持显示锁）
     void RestoreFaceTracker() {
         auto state = Application::GetInstance().GetDeviceState();
@@ -2228,349 +2214,6 @@ private:
         }
     }
 
-    void InitializeIr() {
-        ir_store_.Init();
-        esp_err_t err = ir_driver_.Init(STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "IR driver init failed (%d): IR 功能禁用（需配置 ir_config.h 引脚，TC-8）", err);
-            return;
-        }
-        ir_service_.Attach(&ir_driver_, &ir_store_);
-        // RS-1：红外发码期间暂停摄像头采集（人脸跟随暂停），发码后按设备状态恢复
-        ir_service_.SetCameraPauseHook([this](bool paused) {
-            if (paused) {
-                face_tracker_.Pause(false);  // 暂停跟随且不恢复扫视
-            } else {
-                RestoreFaceTracker();
-            }
-        });
-        // FR-08：红外状态 → LED/表情/舵机反馈（经主线程 Schedule 执行，避免锁冲突）
-        ir_service_.SetStateListener([this](stackchan_ir::IrState state, const std::string& detail) {
-            Application::GetInstance().Schedule([this, state, detail]() {
-                HandleIrState(state, detail);
-            });
-        });
-        RegisterIrMcpTools();
-        RegisterActionMcpTools();
-        ESP_LOGI(TAG, "IR service ready (tx=GPIO%d rx=GPIO%d)",
-                 STACKCHAN_IR_TX_GPIO, STACKCHAN_IR_RX_GPIO);
-    }
-
-    void RegisterIrMcpTools() {
-        auto& mcp = McpServer::GetInstance();
-
-        // self.ir.send —— 发射指定设备按键码（联动链路核心工具）
-        // 描述通用化（不预埋设备清单，避免"新学设备需重启"与 8000B 分页问题）；
-        // learn_start 的返回值让 LLM 知道已学按键；失败时错误串携带可用清单
-        {
-            std::string desc =
-                "Send an IR remote control code to an appliance (air conditioner, TV, etc.). "
-                "device: appliance name learned earlier (e.g. 空调) or its id (dev1). "
-                "key: button name learned earlier (e.g. power/temp_up/temp_down/mode/"
-                "fan_speed/wind_swing/timer/mute, or any custom name). "
-                "If the head needs to aim at the appliance, call self.servo.pan first. "
-                "Use self.ir.list to query what the user has learned.";
-            mcp.AddTool("self.ir.send", desc,
-                        PropertyList({Property("device", kPropertyTypeString),
-                                      Property("key", kPropertyTypeString)}),
-                        [this](const PropertyList& props) -> ReturnValue {
-                            std::string device = props["device"].value<std::string>();
-                            std::string key = props["key"].value<std::string>();
-                            std::string err;
-                            if (ir_service_.Emit(device, key, &err)) {
-                                return true;
-                            }
-                            // 失败信息携带可用设备清单，供 LLM 反馈并重试
-                            return std::string("IR send failed: ") + err +
-                                   ". Learned devices: " + IrDeviceListText();
-                        });
-        }
-
-        // self.ir.learn_start —— 语音引导学习（异步工具）
-        // 调用后设备进入捕获等待（10s 超时），状态监听器负责保存并异步回复结果。
-        // LLM 为每个按键调用一次即可完成整套设备学习（全程语音引导，屏幕为辅助）
-        {
-            std::string desc =
-                "Start learning ONE IR button of an appliance. The user must press that "
-                "button on the original remote control within 10 seconds (aim at the front "
-                "of the device). This call waits asynchronously and returns the result "
-                "(success/timeout). "
-                "Call it once per button: first guide the user, e.g. speak '请按遥控器电源键', "
-                "then call learn_start(device=<name>, key=power). "
-                "device is the appliance name (e.g. 空调/电视); it is created automatically "
-                "if new, or the existing one is updated if already learned. "
-                "Suggested keys: power, temp_up, temp_down, mode, fan_speed, wind_swing, "
-                "timer, mute — or any custom name. "
-                "After learning all buttons, tell the user it is done and they can say "
-                "e.g. '打开空调' (then use self.ir.send).";
-            auto* tool = mcp.AddTool(
-                "self.ir.learn_start", desc,
-                PropertyList({Property("device", kPropertyTypeString),
-                              Property("key", kPropertyTypeString)}),
-                [this](const PropertyList& props) -> ReturnValue {
-                    if (ir_learn_voice_ || !ir_learn_key_.empty()) {
-                        return std::string("已有语音学习进行中，请先完成");
-                    }
-                    if (ir_service_.state() == stackchan_ir::IrState::kLearning) {
-                        return std::string("已在学习中，请先完成当前学习");
-                    }
-                    ir_learn_device_ = props["device"].value<std::string>();
-                    ir_learn_key_ = props["key"].value<std::string>();
-                    ir_learn_voice_ = true;
-                    if (!ir_service_.LearnStart(0)) {
-                        ir_learn_voice_ = false;
-                        ir_learn_key_.clear();
-                        return std::string("学习启动失败（红外模块不可用）");
-                    }
-                    // 异步：捕获/超时由状态监听器保存按键并 ReplyAsyncResult
-                    return std::string(McpServer::kAsyncMarker);
-                });
-            if (tool != nullptr) tool->set_async(true);
-        }
-
-        // self.ir.learn_cancel —— 取消当前语音学习（用户要求跳过/中止按键时）
-        mcp.AddTool(
-            "self.ir.learn_cancel",
-            "Cancel the current voice learning task. Use it when the user wants to skip "
-            "or abort learning the current button (e.g. user says 跳过/取消/不学这个键). "
-            "The pending learn_start call will be answered with a cancelled result, then "
-            "guide the user to the next button or finish.",
-            PropertyList(),
-            [this](const PropertyList&) -> ReturnValue {
-                if (!ir_learn_voice_ || ir_learn_key_.empty()) {
-                    return std::string("当前没有进行中的语音学习任务");
-                }
-                ir_service_.LearnCancel();  // 触发 kIdle("学习已取消") → 状态监听器回复 learn_start
-                return std::string("已取消当前学习");
-            });
-
-        // self.ir.list —— 查询已学设备与按键
-        mcp.AddTool(
-            "self.ir.list",
-            "List all learned IR devices and their buttons. Use this when the user asks "
-            "what remotes are learned, or before sending codes to verify a button exists.",
-            PropertyList(),
-            [this](const PropertyList&) -> ReturnValue {
-                auto devices = ir_service_.ListDevices();
-                if (devices.empty()) {
-                    return std::string(
-                        "尚未学习任何设备。可以引导用户学习：对设备说「帮我学一下空调」");
-                }
-                std::string out = "已学习设备：";
-                for (const auto& dev : devices) {
-                    out += dev.name + "(id=" + dev.id + ", type=" + dev.type + ")：";
-                    if (dev.keys.empty()) {
-                        out += "无按键";
-                    } else {
-                        for (const auto& kv : dev.keys) out += kv.first + ",";
-                    }
-                    out += "；";
-                }
-                return out;
-            });
-
-        // self.ir.delete —— 删除设备（整套）或单个按键
-        mcp.AddTool(
-            "self.ir.delete",
-            "Delete a learned IR device (all its buttons) or a single button of it. "
-            "key is optional: omit it to delete the whole device. "
-            "Confirm with the user before deleting.",
-            PropertyList({Property("device", kPropertyTypeString),
-                          Property("key", kPropertyTypeString, std::string(""))}),
-            [this](const PropertyList& props) -> ReturnValue {
-                std::string device = props["device"].value<std::string>();
-                std::string key = props["key"].value<std::string>();
-                bool found = false;
-                for (const auto& dev : ir_service_.ListDevices()) {
-                    if (dev.id == device || dev.name == device || dev.type == device) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    return std::string("设备不存在: ") + device +
-                           ". Learned devices: " + IrDeviceListText();
-                }
-                if (key.empty()) {
-                    bool ok = ir_service_.RemoveDevice(device);
-                    return ok ? std::string("已删除设备 ") + device
-                              : std::string("删除失败: ") + device;
-                }
-                bool ok = ir_service_.RemoveKey(device, key);
-                return ok ? std::string("已删除按键 ") + device + "." + key
-                          : std::string("按键不存在: ") + device + "." + key;
-            });
-
-        // self.servo.pan —— 云台转向（联动对准家电），2s 后自动恢复人脸跟随（RS-4）
-        // device 参数（可选）：提供时把当前角度保存为该设备的云台方位预设（DAT-2）
-        mcp.AddTool(
-            "self.servo.pan",
-            "Turn the robot's pan-tilt head to aim at a direction. Use it before self.ir.send "
-            "so the IR emitter points at the target appliance. yaw: -45 (left) .. 45 (right) "
-            "degrees; pitch: 5 (down) .. 60 (up) degrees. If the user asks to remember an "
-            "appliance's position, pass device=<id> to save this angle as that device's pan "
-            "preset. Face tracking resumes automatically after 2 seconds.",
-            PropertyList({Property("yaw", kPropertyTypeInteger, 0, -45, 45),
-                          Property("pitch", kPropertyTypeInteger, 30, 5, 60),
-                          Property("device", kPropertyTypeString, std::string(""))}),
-            [this](const PropertyList& props) -> ReturnValue {
-                if (!servo_ok_) {
-                    return std::string("servo not available");
-                }
-                int yaw = props["yaw"].value<int>();
-                int pitch = props["pitch"].value<int>();
-                std::string device = props["device"].value<std::string>();
-                if (!device.empty()) {
-                    if (!ir_service_.SetDevicePan(device, yaw, pitch)) {
-                        return std::string("device not found: ") + device +
-                               " (请先学习该设备)";
-                    }
-                }
-                int _yaw = yaw, _pitch = pitch;
-                Application::GetInstance().Schedule([this, _yaw, _pitch]() {
-                    face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
-                    servo_.MoveTo(_yaw, _pitch, 400);
-                });
-                SchedulePanRestore();
-                return true;
-            });
-    }
-
-    // 已学设备清单文本（MCP 工具失败时携带，供 LLM 反馈用户）
-    std::string IrDeviceListText() const {
-        auto devices = ir_service_.ListDevices();
-        if (devices.empty()) return "（尚未学习任何设备）";
-        std::string out;
-        for (const auto& dev : devices) {
-            out += dev.name + "(" + dev.id + "): ";
-            for (const auto& kv : dev.keys) out += kv.first + ",";
-            out += "; ";
-        }
-        return out;
-    }
-
-    // 语音学习捕获完成：保存按键到设备并异步回复 MCP 调用
-    void HandleVoiceLearnCaptured() {
-        if (!ir_learn_voice_ || ir_learn_key_.empty()) return;
-        auto code = ir_service_.LearnCapturedCode();
-        std::string key = ir_learn_key_;
-        std::string device = ir_learn_device_;
-        std::string device_id = ir_service_.ResolveDeviceId(device);
-        bool ok = ir_service_.SaveLearnedKey(device_id, "其他", device, key, code);
-        std::string result = ok ? (key + " 学习成功 (" + code.protocol + " " +
-                                   std::to_string(code.bits) + "bit, 已保存到 " + device + ")")
-                                : std::string("保存失败");
-        ir_learn_voice_ = false;
-        ir_learn_key_.clear();
-        McpServer::GetInstance().ReplyAsyncResult(result);
-    }
-
-    // 语音学习结束（超时/取消）：异步回复挂起的 learn_start 调用并清理状态
-    void HandleVoiceLearnEnd(const std::string& detail) {
-        if (!ir_learn_voice_ || ir_learn_key_.empty()) return;
-        ir_learn_voice_ = false;
-        ir_learn_key_.clear();
-        bool cancelled = detail.find("取消") != std::string::npos;
-        McpServer::GetInstance().ReplyAsyncResult(
-            cancelled ? "学习已取消（用户跳过该按键）"
-                      : "超时：未捕获到信号，请让用户对准设备正面再按一次遥控器按键");
-    }
-
-    // ---- FR-08：红外状态反馈（LED 闪烁 / 舵机点头 / 通知 / 语音学习驱动）----
-    // 仅在主线程（Application::Schedule）调用，display 操作可安全取锁
-    void HandleIrState(stackchan_ir::IrState state, const std::string& detail) {
-        if (state == stackchan_ir::IrState::kLearning) {
-            SetLedManual(Rgb888To565(30, 90, 200));  // 学习：蓝色常亮
-        } else if (state == stackchan_ir::IrState::kError) {
-            FlashLed(Rgb888To565(220, 30, 30));      // 失败：红色闪烁
-            if (display_ != nullptr) {
-                display_->ShowNotification(detail.c_str(), 2000);
-            }
-        } else if (state == stackchan_ir::IrState::kCaptured) {
-            FlashLed(Rgb888To565(0, 200, 80));       // 捕获成功：绿色
-            HandleVoiceLearnCaptured();              // 语音学习：保存 + 异步回复
-        } else if (state == stackchan_ir::IrState::kIdle) {
-            if (detail.rfind("emitted", 0) == 0) {
-                FlashLed(Rgb888To565(0, 200, 80));   // 发射成功：绿色
-                if (servo_ok_) servo_.Nod();          // 物理点头反馈
-            } else if (detail.rfind("已保存", 0) == 0) {
-                FlashLed(Rgb888To565(0, 200, 80));   // 学习保存：绿色
-            } else {
-                // 语音学习结束（超时/取消）：异步回复挂起的 learn_start
-                if (ir_learn_voice_) HandleVoiceLearnEnd(detail);
-                RestoreStateLed();                   // 取消/超时：恢复状态灯
-            }
-        }
-    }
-
-    // 手动点亮整圈 LED（12 颗同色），进入手动模式
-    void SetLedManual(uint16_t rgb565) {
-        if (!py32_dev_) return;
-        led_manual_ = true;
-        uint16_t colors[12];
-        for (int i = 0; i < 12; i++) colors[i] = rgb565;
-        Py32SetLedFrame(colors, 12);
-    }
-
-    // 闪烁反馈：点亮 → 500ms 后恢复状态灯（定时器可复用）
-    void FlashLed(uint16_t rgb565) {
-        SetLedManual(rgb565);
-        if (led_flash_timer_ == nullptr) {
-            esp_timer_create_args_t args = {};
-            args.callback = [](void* arg) {
-                auto* self = static_cast<M5StackCoreS3Board*>(arg);
-                self->RestoreStateLed();
-            };
-            args.arg = this;
-            args.dispatch_method = ESP_TIMER_TASK;
-            args.name = "led_flash";
-            esp_timer_create(&args, &led_flash_timer_);
-        } else {
-            esp_timer_stop(led_flash_timer_);
-        }
-        esp_timer_start_once(led_flash_timer_, 500 * 1000);
-    }
-
-    // 恢复状态灯：Speaking 橙 / Listening 绿 / 其余灭（与 SetLedUpdater 逻辑一致）
-    void RestoreStateLed() {
-        if (!py32_dev_) return;
-        led_manual_ = false;  // 反馈结束，恢复自动模式
-        auto state = Application::GetInstance().GetDeviceState();
-        uint16_t color = 0;
-        if (state == kDeviceStateSpeaking) {
-            color = Rgb888To565(255, 120, 0);
-        } else if (state == kDeviceStateListening) {
-            color = Rgb888To565(0, 255, 0);
-        }
-        if (color != 0) {
-            uint16_t colors[12];
-            for (int i = 0; i < 12; i++) colors[i] = color;
-            Py32SetLedFrame(colors, 12);
-        } else {
-            uint16_t off[12] = {};
-            Py32SetLedFrame(off, 12);
-        }
-    }
-
-    // 遥控屏初始化：LVGL 输入设备读取 FT6336；打开时让渡手势语义（RS-3）
-    void InitializeIrRemoteScreen() {
-        ir_remote_screen_.Init(
-            display_, &ir_service_,
-            [this](lv_indev_t*, lv_indev_data_t* data) {
-                ft6336_->UpdateTouchPoint();
-                const auto& tp = ft6336_->GetTouchPoint();
-                if (tp.num > 0) {
-                    data->point.x = tp.x;
-                    data->point.y = tp.y;
-                    data->state = LV_INDEV_STATE_PRESSED;
-                } else {
-                    data->state = LV_INDEV_STATE_RELEASED;
-                }
-            },
-            [this](bool open) { remote_screen_open_ = open; });
-        ESP_LOGI(TAG, "IR remote screen ready (双指触摸打开)");
-    }
-
     // ---- 动作/表情 MCP 工具（源自 stackchan-mcp 引入评估）----
     // 板级能力全部现成（Nod/Shake/Center/SetEmotion），仅需暴露给 LLM
     void RegisterActionMcpTools() {
@@ -2584,7 +2227,7 @@ private:
                     [this](const PropertyList&) -> ReturnValue {
                         if (!servo_ok_) return std::string("servo not available");
                         // 必须在主线程执行: MCP 回调跑在协议任务里, 直接写舵机总线不生效
-                        // (与 IR 反馈路径 HandleIrState 的做法一致)。
+                        // (与其他 MCP 舵机/表情工具的做法一致)。
                         // 不再做 IsAnimating 预检: 预检跑在 WS 任务、动作在主线程执行(TOCTOU),
                         // 命中时回 "busy" 等于把用户指令丢掉; 忙/排队由 servo_ 层统一处理
                         Application::GetInstance().Schedule([this]() { servo_.Nod(); });
@@ -2617,6 +2260,28 @@ private:
                         SchedulePanRestore();
                         return true;
                     });
+
+        // self.servo.pan —— 云台转向，2s 后自动恢复人脸跟随（RS-4）
+        mcp.AddTool(
+            "self.servo.pan",
+            "Turn the robot's pan-tilt head to aim at a direction. yaw: -45 (left) .. "
+            "45 (right) degrees; pitch: 5 (down) .. 60 (up) degrees. "
+            "Face tracking resumes automatically after 2 seconds.",
+            PropertyList({Property("yaw", kPropertyTypeInteger, 0, -45, 45),
+                          Property("pitch", kPropertyTypeInteger, 30, 5, 60)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                if (!servo_ok_) {
+                    return std::string("servo not available");
+                }
+                int yaw = props["yaw"].value<int>();
+                int pitch = props["pitch"].value<int>();
+                Application::GetInstance().Schedule([this, yaw, pitch]() {
+                    face_tracker_.Pause(false);  // 暂停跟随，让位云台转向
+                    servo_.MoveTo(yaw, pitch, 400);
+                });
+                SchedulePanRestore();
+                return true;
+            });
 
         // self.get_servo_state —— 舵机诊断(远程排查): 读两路舵机是否应答
         mcp.AddTool("self.get_servo_state",
@@ -3020,12 +2685,6 @@ private:
             }
         }
 
-        // 红外遥控屏打开时：触摸仅用于唤醒，手势逻辑让渡给 LVGL（RS-3）
-        if (remote_screen_open_) {
-            ResetTouchState();
-            return;
-        }
-
         if (touch_point.num > 0 && !was_touched_) {
             // 按下
             was_touched_ = true;
@@ -3038,12 +2697,6 @@ private:
             touch_total_move_ = 0;
         }
         else if (touch_point.num > 0 && was_touched_) {
-            // 双指按下 → 打开红外遥控屏（手势语义切到遥控屏，RS-3）
-            if (touch_point.num >= 2) {
-                ResetTouchState();
-                ir_remote_screen_.Open();
-                return;
-            }
             // 按住中 — 累积移动距离
             touch_total_move_ += abs(touch_point.x - touch_last_x_) + abs(touch_point.y - touch_last_y_);
             touch_last_x_ = touch_point.x;
@@ -3268,9 +2921,8 @@ public:
                 ESP_LOGE(TAG, "[led] Py32SetLedFrame FAILED (i2c write error)");
             }
         });
-        InitializeIr();
+        RegisterActionMcpTools();
         InitializeFt6336TouchPad();
-        InitializeIrRemoteScreen();
         InitializeBmi270();
         InitializeSi12T();
         InitializeMorningGreeting();

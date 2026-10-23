@@ -1,25 +1,9 @@
 # Stackchan-Newstep: StackChan K151 单机多功能融合固件
 
-基于 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 的 M5Stack Core S3 Stack-chan 增强固件（由 Stackchan-HtSz 演进）。在原版语音交互基础上增加了触摸、体感、情绪灯、舵机等**陪伴感**交互，并**新增红外家电遥控**——学习、发射、语音联动全链路，单机零外设完成「语音指令 → 云台对准家电 → 红外发码 → 表情反馈」闭环。
+基于 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 的 M5Stack Core S3 Stack-chan 增强固件（由 Stackchan-HtSz 演进）。在原版语音交互基础上增加了触摸、体感、情绪灯、舵机等**陪伴感**交互。
 
 
 ## 功能一览
-
-### 红外家电遥控（本项目新增 ⭐）
-
-- **RMT 红外收发**：38kHz 载波，NEC / NEC-ext（16/32bit）协议编解码（`main/ir/`，独立模块）
-- **遥控屏学习（连续整套）**：**双指触摸屏幕**打开红外遥控屏 → 点灰色按键即进入学习 → 对准原装遥控器按按键 → 10 秒内自动捕获保存（完全离线）；学完一个键**无需退出**可连续学下一键，一台设备一次学完；**长按绿色按键重新学习**、**长按设备条目删除整套**
-- **语音学习（全程对话引导）**：说「帮我学一下空调遥控器」→ LLM 逐键语音引导（请按电源键/温度+…）→ 设备自动捕获保存并回传结果 → 学完当场可用（详见[使用指南](#语音控制需小智云端-llm-支持-mcp)）
-- **码库持久化**：NVS 存储（设备/按键/协议+码值），重启不丢，支持 JSON 导入导出
-- **语音联动（MCP 工具）**：
-  - `self.ir.send(device, key)` — 发射指定设备按键码（失败时返回可用设备清单）
-  - `self.ir.learn_start(device, key)` — 异步语音学习一个按键（捕获成功/超时自动回复）
-  - `self.ir.list()` — 查询已学设备与按键
-  - `self.ir.delete(device, key?)` — 删除设备（整套）或单个按键
-  - `self.servo.pan(yaw, pitch, device?)` — 云台转向对准家电；带 `device` 时把当前角度保存为该设备方位预设（「记下空调的位置」）
-- **反馈闭环（FR-08）**：发码成功 LED 绿闪+点头、失败红闪+通知、学习中蓝色常亮
-- **硬件细节**：发码期间自动暂停摄像头采集（防电磁干扰，RS-1）；红外引脚 G5(IR_SEND)/G10(IR_REC)
-- **逻辑测试**：NEC 编解码主机端镜像测试 38/38（`tools/nec_codec_test.py`，含重复帧/抖动/边界）
 
 ### SD 卡与拍照存卡（本项目新增 ⭐）
 
@@ -44,20 +28,19 @@
 ### 屏幕触摸 (FT6336)
 
 - 单击开关对话、双击、上下左右滑动、长按 6 种手势
-- 60 条随机动作文本（可自定义）；**双指触摸打开红外遥控屏**
+- 60 条随机动作文本（可自定义）
 
 ### WS2812 情绪灯环
 
 - 12颗 LED，通过 PY32 IO Expander (0x6F) 控制
 - 21种情绪对应颜色映射，跟表情同步变化
 - MCP 工具支持：`self.led.set_color`、`self.led.turn_off`、`self.led.auto`
-- 红外反馈色：学习蓝 / 成功绿 / 失败红
 
 ### 舵机 (SCS 总线)
 
 - 摄像头人脸追踪 (GC0308)
 - 空闲扫视动画
-- 对话时暂停/恢复；语音联动时转向家电方位（2s 后自动恢复跟随）
+- 对话时暂停/恢复；语音可调用 `self.servo.pan` 转向（2s 后自动恢复跟随）
 
 ### 其他
 
@@ -67,28 +50,7 @@
 - 电池监测 + 低电量提醒
 - I2C 错误容错处理（防止偶发超时导致整机重启）
 
-## 红外遥控使用指南
-
-### 学习新码（触摸屏）
-
-1. **双指同时触摸屏幕** → 打开「红外遥控」屏
-2. 点「＋ 学习新设备」（或进入已有设备）
-3. 点**灰色按键**（电源/温度±/模式/风速/摆风/定时/静音）→ 进入学习
-4. 10 秒内对准原装遥控器按对应按键 → 状态显示「已保存」，按键**变绿**
-5. 点绿色按键即可发射；左上角「返回」回到聊天界面
-
-### 语音控制（需小智云端 LLM 支持 MCP）
-
-| 你说 | 效果 |
-|---|---|
-| 「打开客厅空调」 | 云台转向空调方位 → 发射电源码 → 绿闪+点头+语音反馈 |
-| 「把空调调到 25 度」 | LLM 调 `self.ir.send` 发温度码 |
-| 「记下空调的位置」 | 云台转到当前角度并保存为该设备方位预设（DAT-2） |
-| 「帮我学一下空调遥控器」 | **语音学习**：LLM 逐键引导完成整套学习（`self.ir.learn_start` 异步） |
-| 「学了哪些设备？」 | `self.ir.list` 查询码库 |
-| 「删掉电视遥控器」 | `self.ir.delete` 删除整套 |
-
-### 动作与表情（语音）
+## 动作与表情（语音）
 
 | 你说 | 效果 |
 |---|---|
@@ -96,12 +58,6 @@
 | 「给我唱首歌吧」（做不到时） | 摇头婉拒（`self.servo.shake`） |
 | 「转回去看前面」 | 云台归位（`self.servo.home`），2s 后恢复跟随 |
 | 「做个鬼脸！」「装难过」「笑一个」 | 指定表情（`self.face.set_emotion`），自动联动舵机动画+情绪灯 |
-
-### 已知限制
-
-- 首期仅支持 NEC/NEC-ext 协议；Sony/RC-5 等协议暂未实现（码库按协议存储，后续可扩展）
-- 语音学习依赖云端 LLM 正确调用 MCP 工具，**断网时不可用**；屏内学习/发射完全离线可用
-- 工具描述通用化，新学设备**当场可用**，无需重启
 
 ## 编译 & 烧录
 
@@ -130,9 +86,7 @@ idf.py -p COM端口 flash
 ### 代码风格检查（可选）
 
 ```bash
-clang-format --dry-run --Werror main/ir/*.cc main/ir/*.h \
-    main/boards/m5stack-core-s3/ir_remote_screen.cc \
-    main/boards/m5stack-core-s3/ir_remote_screen.h
+clang-format --dry-run --Werror main/boards/m5stack-core-s3/m5stack_core_s3.cc
 ```
 
 ## 配置
@@ -148,8 +102,6 @@ CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=35
 CONFIG_OTA_URL="http://你的服务器IP:8003/xiaozhi/ota/"
 ```
 
-红外参数（引脚/载波/超时）见 `main/ir/ir_config.h`。
-
 ## 服务端
 
 本固件配合 [xiaozhi-esp32-server](https://github.com/78/xiaozhi-esp32-server) 使用。需要在服务端配置 LLM 和 TTS。
@@ -162,7 +114,7 @@ CONFIG_OTA_URL="http://你的服务器IP:8003/xiaozhi/ota/"
 |---|---|
 | [docs/功能描述与使用手册.md](docs/功能描述与使用手册.md) | 功能全景 + 操作步骤 + 语音口令速查（交付物 D-2） |
 | [docs/开发需求文档.md](docs/开发需求文档.md) | PRD（V1.1：需求、验收标准、阶段规划） |
-| [docs/架构设计文档.md](docs/架构设计文档.md) | 架构设计（V1.2：IR 模块、MCP 扩展、ADR、TC） |
+| [docs/架构设计文档.md](docs/架构设计文档.md) | 架构设计（V1.2：MCP 扩展、ADR、TC；含历史 IR 设计） |
 | [docs/开发计划.md](docs/开发计划.md) | 开发计划（V1.1：异地验证工作流） |
 | [docs/基线盘点与清理分析.md](docs/基线盘点与清理分析.md) | 基线实证与清理报告 |
 | [docs/验证机编译验证说明.md](docs/验证机编译验证说明.md) | 验证机编译流程 + 12 条冒烟用例 |
@@ -176,24 +128,16 @@ CONFIG_OTA_URL="http://你的服务器IP:8003/xiaozhi/ota/"
 - **手势动作池**：搜索 `DoubleClickPool`、`UpSwipePool` 等函数
 - **早安问候**：搜索 `MorningLoop`
 - **情绪灯颜色**：搜索 `UpdateLedsFromEmotion`
-- **红外预设键**：`main/boards/m5stack-core-s3/ir_remote_screen.cc` 的 `kPresetKeys`
-- **红外参数/引脚**：`main/ir/ir_config.h`
 
 ## 目录结构（本项目新增部分）
 
 ```
 main/
-├── ir/                            # ★ 红外模块（独立目录）
-│   ├── ir_driver.*                # RMT 收发驱动（38kHz 载波）
-│   ├── ir_codec.* + ir_codec_nec.* # 协议编解码与注册表
-│   ├── ir_store.*                 # NVS 码库持久化 + JSON 导入导出
-│   └── ir_service.*               # 学习/发射编排 + RS-1 摄像头暂停挂钩
 ├── sd/                            # ★ SD 卡模块
 │   ├── sd_card.*                  # TF 挂载/文件读写（GPIO35 方向守卫 + LVGL 暂停）
 │   └── sd_photo.*                 # 拍照存卡（image_to_jpeg 复用）
 └── boards/m5stack-core-s3/
-    ├── ir_remote_screen.*         # ★ LVGL 红外遥控屏（双指打开）
-    └── m5stack_core_s3.cc         # 板级集成：MCP 工具/反馈/手势让渡
+    └── m5stack_core_s3.cc         # 板级集成：MCP 工具/触摸/体感/舵机
 ```
 
 ## 致谢

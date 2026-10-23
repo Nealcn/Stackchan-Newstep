@@ -37,16 +37,11 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
-            "ir/ir_driver.cc"
-            "ir/ir_codec.cc"
-            "ir/ir_codec_nec.cc"
-            "ir/ir_store.cc"
-            "ir/ir_service.cc"
             "sd/sd_card.cc"
             "sd/sd_photo.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "ir" "sd")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols" "sd")
 
 # Add board common files
 list(APPEND SOURCES
