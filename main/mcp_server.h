@@ -62,6 +62,7 @@ private:
     PropertyType type_;
     std::variant<bool, int, std::string> value_;
     bool has_default_value_;
+    bool provided_ = false;         // 本次调用中该参数是否被显式传入（仅在 set_value 成功后置位）
     std::optional<int> min_value_;  // 新增：整数最小值
     std::optional<int> max_value_;  // 新增：整数最大值
 
@@ -98,6 +99,7 @@ public:
     inline const std::string& name() const { return name_; }
     inline PropertyType type() const { return type_; }
     inline bool has_default_value() const { return has_default_value_; }
+    inline bool provided() const { return provided_; }
     inline bool has_range() const { return min_value_.has_value() && max_value_.has_value(); }
     inline int min_value() const { return min_value_.value_or(0); }
     inline int max_value() const { return max_value_.value_or(0); }
@@ -119,6 +121,7 @@ public:
             }
         }
         value_ = value;
+        provided_ = true;
     }
 
     std::string to_json() const {

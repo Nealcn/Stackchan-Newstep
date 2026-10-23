@@ -7,6 +7,7 @@
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "mcp_server.h"
+#include "settings.h"
 #include "ir/ir_service.h"
 #include "ir/ir_config.h"
 #include "ir_remote_screen.h"
@@ -16,6 +17,7 @@
 
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <cJSON.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -89,7 +91,7 @@ public:
         args.name = "servo_idle";
         args.skip_unhandled_events = true;
         esp_timer_create(&args, &idle_timer_);
-        esp_timer_start_periodic(idle_timer_, 4000000);  // 待机扫视间隔 4s（恢复基线节奏）
+        esp_timer_start_periodic(idle_timer_, 10000000);  // 待机扫视间隔 10s（用户设定）
         scan_running_ = true;
         return true;
     }
@@ -129,7 +131,7 @@ public:
 
     void ResumeScan() {
         if (!scan_running_ && idle_timer_) {
-            esp_timer_start_periodic(idle_timer_, 4000000);  // 待机扫视间隔 4s（恢复基线节奏）
+            esp_timer_start_periodic(idle_timer_, 10000000);  // 待机扫视间隔 10s（用户设定）
             scan_running_ = true;
         }
     }
@@ -168,7 +170,7 @@ private:
             int yaw = (rand() % 51) - 25;
             int pitch = 25 + (rand() % 11);
             ESP_LOGI("Servo", "[scan] 待机扫视 yaw=%d pitch=%d", yaw, pitch);
-            self->MoveTo(yaw, pitch, 1500);  // 扫视动作 1.5s 走完（恢复基线）
+            self->MoveTo(yaw, pitch, 3000);  // 扫视动作 3s 走完（用户设定）
         });
     }
 
@@ -1527,6 +1529,41 @@ private:
     TouchPoint_t tp_;
 };
 
+namespace {
+
+// 交互灵敏度参数：默认值保持既有行为（touch_confirm_frames 除外，见方案）
+constexpr int kBehTouchFramesDefault    = 2;
+constexpr int kBehTouchFramesMin        = 1;
+constexpr int kBehTouchFramesMax        = 5;
+constexpr int kBehTouchCooldownDefault  = 5;
+constexpr int kBehTouchCooldownMin      = 0;
+constexpr int kBehTouchCooldownMax      = 60;
+constexpr int kBehMotionThreshDefault   = 30;   // 单位 0.01g（30 = 0.30g）
+constexpr int kBehMotionThreshMin       = 15;
+constexpr int kBehMotionThreshMax       = 80;
+constexpr int kBehShakePeaksDefault     = 2;
+constexpr int kBehShakePeaksMin         = 2;
+constexpr int kBehShakePeaksMax         = 5;
+constexpr int kBehMotionCooldownDefault = 120;
+constexpr int kBehMotionCooldownMin     = 0;
+constexpr int kBehMotionCooldownMax     = 600;
+
+struct BehaviorCfg {
+    int  touch_confirm_frames = kBehTouchFramesDefault;    // NVS: touch_frames
+    int  touch_cooldown_s     = kBehTouchCooldownDefault;  // NVS: touch_cool_s
+    bool pet_enabled          = true;                      // NVS: pet_en
+    int  motion_thresh_cg     = kBehMotionThreshDefault;   // NVS: motion_cg
+    int  shake_peaks          = kBehShakePeaksDefault;     // NVS: shake_peaks
+    int  motion_cooldown_s    = kBehMotionCooldownDefault; // NVS: motion_cool_s
+    bool shake_enabled        = true;                      // NVS: shake_en
+};
+
+inline int ClampInt(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+}  // namespace
+
 class M5StackCoreS3Board : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
@@ -1558,6 +1595,8 @@ private:
     i2c_master_dev_handle_t si12t_dev_ = nullptr;
     TaskHandle_t si12t_task_ = nullptr;
     uint8_t si12t_last_state_ = 0;
+    // ---- 可持久化交互灵敏度配置（NVS namespace "behav"）----
+    BehaviorCfg beh_;
     bool servo_ok_ = false;
     bool low_batt_warned_ = false;
     bool exit_sleep_pending_ = false;
@@ -1587,6 +1626,51 @@ private:
     std::string ir_learn_device_;  // 学习目标设备名（不存在则自动创建）
     std::string ir_learn_key_;     // 学习中按键
     bool ir_learn_voice_ = false;  // true=语音学习（状态监听器负责保存+异步回复）
+
+    // ---- 交互灵敏度配置：NVS 读写（Settings 局部作用域，析构时 commit）----
+    void LoadBehaviorCfg() {
+        Settings s("behav");  // 只读；namespace 不存在时 handle=0，Get* 返回默认值
+        beh_.touch_confirm_frames = ClampInt(
+            s.GetInt("touch_frames", kBehTouchFramesDefault), kBehTouchFramesMin, kBehTouchFramesMax);
+        beh_.touch_cooldown_s = ClampInt(
+            s.GetInt("touch_cool_s", kBehTouchCooldownDefault), kBehTouchCooldownMin, kBehTouchCooldownMax);
+        beh_.pet_enabled = s.GetBool("pet_en", true);
+        beh_.motion_thresh_cg = ClampInt(
+            s.GetInt("motion_cg", kBehMotionThreshDefault), kBehMotionThreshMin, kBehMotionThreshMax);
+        beh_.shake_peaks = ClampInt(
+            s.GetInt("shake_peaks", kBehShakePeaksDefault), kBehShakePeaksMin, kBehShakePeaksMax);
+        beh_.motion_cooldown_s = ClampInt(
+            s.GetInt("motion_cool_s", kBehMotionCooldownDefault), kBehMotionCooldownMin, kBehMotionCooldownMax);
+        beh_.shake_enabled = s.GetBool("shake_en", true);
+
+        ESP_LOGI(TAG, "behavior cfg: touch_frames=%d touch_cool=%ds pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
+                 beh_.touch_confirm_frames, beh_.touch_cooldown_s, (int)beh_.pet_enabled,
+                 beh_.motion_thresh_cg, beh_.shake_peaks, beh_.motion_cooldown_s, (int)beh_.shake_enabled);
+    }
+
+    void SaveBehaviorCfg() {
+        Settings s("behav", true);
+        s.SetInt("touch_frames", beh_.touch_confirm_frames);
+        s.SetInt("touch_cool_s", beh_.touch_cooldown_s);
+        s.SetBool("pet_en", beh_.pet_enabled);
+        s.SetInt("motion_cg", beh_.motion_thresh_cg);
+        s.SetInt("shake_peaks", beh_.shake_peaks);
+        s.SetInt("motion_cool_s", beh_.motion_cooldown_s);
+        s.SetBool("shake_en", beh_.shake_enabled);
+        ESP_LOGI(TAG, "behavior cfg saved");
+    }
+
+    cJSON* BehaviorCfgToJson() const {
+        cJSON* j = cJSON_CreateObject();
+        cJSON_AddNumberToObject(j, "touch_confirm_frames", beh_.touch_confirm_frames);
+        cJSON_AddNumberToObject(j, "touch_cooldown_s", beh_.touch_cooldown_s);
+        cJSON_AddBoolToObject(j, "pet_enabled", beh_.pet_enabled);
+        cJSON_AddNumberToObject(j, "motion_thresh_cg", beh_.motion_thresh_cg);
+        cJSON_AddNumberToObject(j, "shake_peaks", beh_.shake_peaks);
+        cJSON_AddNumberToObject(j, "motion_cooldown_s", beh_.motion_cooldown_s);
+        cJSON_AddBoolToObject(j, "shake_enabled", beh_.shake_enabled);
+        return j;  // 所有权交给 McpTool::Call（打印后释放）
+    }
 
     void InitializeBmi270() {
         // BMI270 实际在 0x69（不是 SDK 默认的 0x68），自己用 IDF i2c API + 底层 bmi270_init 绕过硬编码
@@ -1638,15 +1722,13 @@ private:
 
     void MotionLoop() {
         // 算法：每 100ms 读一次 accel，magnitude 偏离 1g 算"动"
-        //   - 1 秒内出现 ≥3 次"动"尖峰 → 摇晃
+        //   - 1 秒内出现配置的尖峰数 → 摇晃
         //   - 连续 ≥5 个样本（500ms）持续偏离 → 抱起
-        //   - 触发后 disarm，必须连续静止 1 秒（10 个样本）才 re-arm
-        const float MOTION_THRESHOLD = 0.3f;       // delta 或 mag 偏离 1g 超过此值算"动"
-        const int SHAKE_PEAKS_TO_TRIGGER = 2;      // 1 秒内 2 个尖峰算摇晃
+        //   - 触发后 disarm，必须连续静止 2 秒（20 个样本）才 re-arm
+        //   - 阈值 / 尖峰数 / 冷却均来自 beh_，运行时可通过 MCP 调整
         const int64_t SHAKE_WINDOW_US = 1000 * 1000;
         const int LIFT_SAMPLES_TO_TRIGGER = 5;
-        const int STILL_SAMPLES_TO_REARM = 20;     // 2 秒静止即可重新武装(原 5 秒太苛刻)
-        const int64_t GLOBAL_COOLDOWN_US = 2 * 60 * 1000 * 1000LL;  // 触发后 2 分钟全局冷却(原 5 分钟,提高响应频率)
+        const int STILL_SAMPLES_TO_REARM = 20;     // 2 秒静止即可重新武装
 
         int lift_count = 0;
         int still_count = 0;
@@ -1660,6 +1742,12 @@ private:
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(100));
             if (!bmi_handle_) continue;
+
+            // 运行时配置快照：100ms 周期；ESP32-S3 上对齐 32 位读写是原子的
+            const float   motion_threshold       = beh_.motion_thresh_cg / 100.0f;
+            const int     shake_peaks_to_trigger = beh_.shake_peaks;
+            const int64_t global_cooldown_us     = (int64_t)beh_.motion_cooldown_s * 1000000LL;
+            const bool    shake_enabled          = beh_.shake_enabled;
 
             struct bmi2_sens_data accel;
             int8_t rd = bmi2_get_sensor_data(&accel, bmi_handle_);
@@ -1688,7 +1776,7 @@ private:
             last_ax = ax; last_ay = ay; last_az = az; last_valid = true;
 
             // 动 = 轴变化大 OR magnitude 偏离 1g 大
-            bool moving = (delta > MOTION_THRESHOLD) || (fabsf(mag - 1.0f) > MOTION_THRESHOLD);
+            bool moving = (delta > motion_threshold) || (fabsf(mag - 1.0f) > motion_threshold);
             int64_t now = esp_timer_get_time();
             (void)log_counter;  // 诊断 log 已禁用
 
@@ -1702,11 +1790,18 @@ private:
             }
 
             still_count = 0;
+            if (!shake_enabled) {
+                // 总开关关闭：保留静止 re-arm 维护，但清掉瞬态累计，
+                // 避免重新开启时用关闭期间的旧尖峰/抬升计数立即触发
+                lift_count = 0;
+                for (int i = 0; i < 8; i++) shake_peak_times[i] = 0;
+                continue;
+            }
             if (!armed) continue;  // 已触发过，等静止 re-arm
-            // 全局冷却：上次触发后 2 分钟内任何情况都不再触发
-            if (last_motion_trigger_us_ != 0 && (now - last_motion_trigger_us_) < GLOBAL_COOLDOWN_US) continue;
+            // 全局冷却：冷却期内任何情况都不再触发
+            if (last_motion_trigger_us_ != 0 && (now - last_motion_trigger_us_) < global_cooldown_us) continue;
 
-            // 摇晃检测：1 秒内累计 ≥3 个尖峰
+            // 摇晃检测：1 秒内累计达到配置的尖峰数
             shake_peak_times[shake_idx % 8] = now;
             shake_idx++;
             int peak_count = 0;
@@ -1716,7 +1811,7 @@ private:
                     peak_count++;
                 }
             }
-            if (peak_count >= SHAKE_PEAKS_TO_TRIGGER) {
+            if (peak_count >= shake_peaks_to_trigger) {
                 armed = false;
                 lift_count = 0;
                 last_motion_trigger_us_ = now;
@@ -1956,35 +2051,61 @@ private:
         si12t_last_state_ = si12t_dev_ ? Si12tReadReg(0x10) : 0;
 
         int64_t last_touch_time = 0;
-        const int64_t TOUCH_COOLDOWN_US = 5000000;  // 5 秒冷却
+        uint8_t touch_streak[3] = {0};  // 每区连续有效帧计数（去抖）
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(100));
             if (!si12t_dev_) continue;
             uint8_t out = Si12tReadReg(0x10);
             int64_t now = esp_timer_get_time();
+
+            if (!beh_.pet_enabled) {
+                // 总开关关闭：不识别触摸，但仍更新边沿状态，重新开启时不会误判
+                touch_streak[0] = touch_streak[1] = touch_streak[2] = 0;
+                si12t_last_state_ = out;
+                continue;
+            }
+
+            const int confirm_frames = beh_.touch_confirm_frames;
+            const int64_t cooldown_us = (int64_t)beh_.touch_cooldown_s * 1000000LL;
             for (int zone = 0; zone < 3; zone++) {
                 uint8_t cur = (out >> (zone * 2)) & 0x03;
                 uint8_t prev = (si12t_last_state_ >> (zone * 2)) & 0x03;
-                if (cur != 0 && prev == 0 && (now - last_touch_time > TOUCH_COOLDOWN_US)) {
-                    // 本地反馈：爱心表情 + 舵机歪头（不等服务器）
-                    if (display_) {
-                        static_cast<M5StackAvatarDisplay*>(display_)->OnPetted();
-                    }
-                    static const char* msgs[] = {
-                        "主人摸了摸土豆的头",
-                        "主人揉了揉土豆的头顶",
-                        "主人轻拍土豆的脑袋",
-                        "主人蹭了蹭土豆的额头",
-                        "主人戳了戳土豆的脑门",
-                        "主人抚摸土豆的头发",
-                        "主人理了理土豆的头发",
-                    };
-                    const char* msg = msgs[esp_random() % 7];
-                    ESP_LOGI(TAG, "SI12T touch -> %s", msg);
-                    SendUserMessage(msg);
-                    last_touch_time = now;
-                    break;
+                if (cur == 0) {
+                    touch_streak[zone] = 0;
+                    continue;
                 }
+                if (prev == 0) {
+                    touch_streak[zone] = 1;  // 上升沿才开始计数
+                } else if (touch_streak[zone] > 0) {
+                    touch_streak[zone]++;
+                }
+                if (touch_streak[zone] < confirm_frames) continue;
+
+                // 去抖已满足：无论冷却是否允许都消费掉本次触摸，
+                // 避免按住手指在冷却结束后补触发
+                touch_streak[zone] = 0;
+                if (now - last_touch_time <= cooldown_us) continue;
+
+                // 本地反馈：爱心表情 + 舵机歪头（不等服务器）
+                if (display_) {
+                    static_cast<M5StackAvatarDisplay*>(display_)->OnPetted();
+                }
+                static const char* msgs[] = {
+                    "主人摸了摸土豆的头",
+                    "主人揉了揉土豆的头顶",
+                    "主人轻拍土豆的脑袋",
+                    "主人蹭了蹭土豆的额头",
+                    "主人戳了戳土豆的脑门",
+                    "主人抚摸土豆的头发",
+                    "主人理了理土豆的头发",
+                };
+                const char* msg = msgs[esp_random() % 7];
+                ESP_LOGI(TAG, "SI12T touch -> %s (frames=%d cooldown=%ds)",
+                         msg, confirm_frames, beh_.touch_cooldown_s);
+                SendUserMessage(msg);
+                last_touch_time = now;
+                touch_streak[0] = touch_streak[1] = touch_streak[2] = 0;
+                break;
             }
             si12t_last_state_ = out;
         }
@@ -2028,6 +2149,64 @@ private:
                 led_manual_ = false;
                 ESP_LOGI(TAG, "MCP LED auto mode");
                 return true;
+            });
+    }
+
+    // ---- 交互灵敏度配置 MCP 工具（LLM 可见，走普通 AddTool）----
+    void RegisterBehaviorMcpTools() {
+        auto& mcp = McpServer::GetInstance();
+
+        mcp.AddTool("self.behavior.get_config",
+            "Get the touch/pet and motion/shake behavior configuration. "
+            "Returns: touch_confirm_frames, touch_cooldown_s, pet_enabled, "
+            "motion_thresh_cg, shake_peaks, motion_cooldown_s, shake_enabled.",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return BehaviorCfgToJson();
+            });
+
+        mcp.AddTool("self.behavior.set",
+            "Update interaction sensitivity. Omit a field (or pass -1 for integers) to keep it unchanged. "
+            "touch_confirm_frames: 1-5 consecutive 100ms polls; touch_cooldown_s: 0-60; "
+            "pet_enabled: bool (head touch + screen long-press); motion_thresh_cg: 15-80 (0.15-0.80g); "
+            "shake_peaks: 2-5 peaks within 1s; motion_cooldown_s: 0-600; shake_enabled: bool. "
+            "Returns the full updated configuration.",
+            PropertyList({
+                Property("touch_confirm_frames", kPropertyTypeInteger, -1, -1, kBehTouchFramesMax),
+                Property("touch_cooldown_s",     kPropertyTypeInteger, -1, -1, kBehTouchCooldownMax),
+                Property("pet_enabled",          kPropertyTypeBoolean, false),
+                Property("motion_thresh_cg",     kPropertyTypeInteger, -1, -1, kBehMotionThreshMax),
+                Property("shake_peaks",          kPropertyTypeInteger, -1, -1, kBehShakePeaksMax),
+                Property("motion_cooldown_s",    kPropertyTypeInteger, -1, -1, kBehMotionCooldownMax),
+                Property("shake_enabled",        kPropertyTypeBoolean, false),
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                auto apply_int = [&](const char* name, int lo, int hi, int& field) {
+                    int v = props[name].value<int>();
+                    if (v >= 0) field = ClampInt(v, lo, hi);
+                };
+                apply_int("touch_confirm_frames", kBehTouchFramesMin, kBehTouchFramesMax,
+                          beh_.touch_confirm_frames);
+                apply_int("touch_cooldown_s", kBehTouchCooldownMin, kBehTouchCooldownMax,
+                          beh_.touch_cooldown_s);
+                if (props["pet_enabled"].provided()) {
+                    beh_.pet_enabled = props["pet_enabled"].value<bool>();
+                }
+                apply_int("motion_thresh_cg", kBehMotionThreshMin, kBehMotionThreshMax,
+                          beh_.motion_thresh_cg);
+                apply_int("shake_peaks", kBehShakePeaksMin, kBehShakePeaksMax,
+                          beh_.shake_peaks);
+                apply_int("motion_cooldown_s", kBehMotionCooldownMin, kBehMotionCooldownMax,
+                          beh_.motion_cooldown_s);
+                if (props["shake_enabled"].provided()) {
+                    beh_.shake_enabled = props["shake_enabled"].value<bool>();
+                }
+
+                SaveBehaviorCfg();
+                ESP_LOGI(TAG, "MCP behavior.set applied: touch_frames=%d touch_cool=%ds pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
+                         beh_.touch_confirm_frames, beh_.touch_cooldown_s, (int)beh_.pet_enabled,
+                         beh_.motion_thresh_cg, beh_.shake_peaks, beh_.motion_cooldown_s, (int)beh_.shake_enabled);
+                return BehaviorCfgToJson();
             });
     }
 
@@ -2870,8 +3049,8 @@ private:
             touch_last_x_ = touch_point.x;
             touch_last_y_ = touch_point.y;
 
-            // 长按摸头（要手指有移动，不算被物体压）
-            if (!pet_triggered_) {
+            // 长按摸头（要手指有移动，不算被物体压）；受 pet_enabled 总开关控制
+            if (!pet_triggered_ && beh_.pet_enabled) {
                 int64_t held = now - touch_start_time_;
                 if (held >= PET_TOUCH_MS && touch_total_move_ >= PET_MOVE_THRESHOLD_PX) {
                     pet_triggered_ = true;
@@ -3030,7 +3209,9 @@ private:
 
 public:
     M5StackCoreS3Board() {
+        LoadBehaviorCfg();           // 最早加载：NVS 已就绪，交互任务尚未创建
         InitializeI2c();
+        RegisterBehaviorMcpTools();  // 无条件注册，独立于 py32_found_
         InitializeAxp2101();
         InitializeAw9523();
         InitializePowerSaveTimer();  // 移到 Axp2101 之后，确保 pmic_ 已就绪
