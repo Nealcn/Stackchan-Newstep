@@ -117,6 +117,8 @@ public:
         // 记录最后一次实际下发的位置, 供动画取基准(避免用陈旧的 tracker 值把脑袋拽回)
         last_yaw_ = yaw_deg;
         last_pitch_ = pitch_deg;
+        // 预计动作结束时刻: SI12T 触摸判定据此屏蔽（覆盖移动全程 + 尾部）
+        last_move_end_ms_ = (uint32_t)(esp_timer_get_time() / 1000) + (uint32_t)time_ms;
     }
 
     void PauseScan() {
@@ -142,6 +144,10 @@ public:
     void Tilt()  { RequestAction(HeadAction::kTilt); }
 
     bool IsAnimating() const { return anim_running_; }
+    // 预计动作结束时刻(ms, 32 位回绕安全); 0 = 启动后尚未动作
+    uint32_t LastMoveEndMs() const { return last_move_end_ms_; }
+    // 人脸跟随是否处于活动状态（需要 FaceTracker 完整类型，定义在类外）
+    bool IsTracking() const;
     // 诊断: 当前动作/排队动作(0=无 1=nod 2=shake 3=tilt), 供 self.get_servo_state
     int CurrentAction() const { return (int)anim_action_; }
     int PendingAction() const { return (int)pending_action_; }
@@ -224,6 +230,7 @@ private:
     std::mutex anim_mtx_;  // 仅保护闩锁/排队字段, 绝不跨 MoveTo/vTaskDelay
     std::mutex bus_mtx_;   // 仅保护单次 SCS 事务
     int last_yaw_ = 0, last_pitch_ = 30;             // MoveTo 更新, 供动画取基准
+    volatile uint32_t last_move_end_ms_ = 0;         // 动作预计结束时刻(ms)，SI12T 屏蔽用
     std::function<void()> on_anim_done_;
 };
 
@@ -364,6 +371,10 @@ private:
     float smooth_y_ = 0.0f;
     uint8_t prev_frame_[DS_W * DS_H];
 };
+
+bool StackChanServo::IsTracking() const {
+    return tracker_ && !tracker_->IsPaused();
+}
 
 // Nod/Shake/Tilt 的实现已内联到 StackChanServo::RequestAction/RunAnimLoop:
 // 排队补做 + 同动作去重 + 闩锁失败复位 + 按设备状态恢复跟随(经 SetAnimDoneHook)
@@ -1544,10 +1555,15 @@ constexpr int kBehShakePeaksMax         = 5;
 constexpr int kBehMotionCooldownDefault = 120;
 constexpr int kBehMotionCooldownMin     = 0;
 constexpr int kBehMotionCooldownMax     = 600;
+constexpr int kBehTouchGuardDefault     = 1500;  // 舵机动作后触摸屏蔽窗(ms)
+constexpr int kBehTouchGuardMin         = 0;
+constexpr int kBehTouchGuardMax         = 5000;
 
 struct BehaviorCfg {
     int  touch_confirm_frames = kBehTouchFramesDefault;    // NVS: touch_frames
     int  touch_cooldown_s     = kBehTouchCooldownDefault;  // NVS: touch_cool_s
+    int  touch_guard_ms       = kBehTouchGuardDefault;     // NVS: touch_guard_ms
+    bool touch_guard_skip_tracking = false;                // NVS: guard_track
     bool pet_enabled          = true;                      // NVS: pet_en
     int  motion_thresh_cg     = kBehMotionThreshDefault;   // NVS: motion_cg
     int  shake_peaks          = kBehShakePeaksDefault;     // NVS: shake_peaks
@@ -1620,6 +1636,9 @@ private:
             s.GetInt("touch_frames", kBehTouchFramesDefault), kBehTouchFramesMin, kBehTouchFramesMax);
         beh_.touch_cooldown_s = ClampInt(
             s.GetInt("touch_cool_s", kBehTouchCooldownDefault), kBehTouchCooldownMin, kBehTouchCooldownMax);
+        beh_.touch_guard_ms = ClampInt(
+            s.GetInt("touch_guard_ms", kBehTouchGuardDefault), kBehTouchGuardMin, kBehTouchGuardMax);
+        beh_.touch_guard_skip_tracking = s.GetBool("guard_track", false);
         beh_.pet_enabled = s.GetBool("pet_en", true);
         beh_.motion_thresh_cg = ClampInt(
             s.GetInt("motion_cg", kBehMotionThreshDefault), kBehMotionThreshMin, kBehMotionThreshMax);
@@ -1629,8 +1648,9 @@ private:
             s.GetInt("motion_cool_s", kBehMotionCooldownDefault), kBehMotionCooldownMin, kBehMotionCooldownMax);
         beh_.shake_enabled = s.GetBool("shake_en", true);
 
-        ESP_LOGI(TAG, "behavior cfg: touch_frames=%d touch_cool=%ds pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
-                 beh_.touch_confirm_frames, beh_.touch_cooldown_s, (int)beh_.pet_enabled,
+        ESP_LOGI(TAG, "behavior cfg: touch_frames=%d touch_cool=%ds guard=%dms track_guard=%d pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
+                 beh_.touch_confirm_frames, beh_.touch_cooldown_s, beh_.touch_guard_ms,
+                 (int)beh_.touch_guard_skip_tracking, (int)beh_.pet_enabled,
                  beh_.motion_thresh_cg, beh_.shake_peaks, beh_.motion_cooldown_s, (int)beh_.shake_enabled);
     }
 
@@ -1638,6 +1658,8 @@ private:
         Settings s("behav", true);
         s.SetInt("touch_frames", beh_.touch_confirm_frames);
         s.SetInt("touch_cool_s", beh_.touch_cooldown_s);
+        s.SetInt("touch_guard_ms", beh_.touch_guard_ms);
+        s.SetBool("guard_track", beh_.touch_guard_skip_tracking);
         s.SetBool("pet_en", beh_.pet_enabled);
         s.SetInt("motion_cg", beh_.motion_thresh_cg);
         s.SetInt("shake_peaks", beh_.shake_peaks);
@@ -1650,6 +1672,8 @@ private:
         cJSON* j = cJSON_CreateObject();
         cJSON_AddNumberToObject(j, "touch_confirm_frames", beh_.touch_confirm_frames);
         cJSON_AddNumberToObject(j, "touch_cooldown_s", beh_.touch_cooldown_s);
+        cJSON_AddNumberToObject(j, "touch_guard_ms", beh_.touch_guard_ms);
+        cJSON_AddBoolToObject(j, "touch_guard_skip_tracking", beh_.touch_guard_skip_tracking);
         cJSON_AddBoolToObject(j, "pet_enabled", beh_.pet_enabled);
         cJSON_AddNumberToObject(j, "motion_thresh_cg", beh_.motion_thresh_cg);
         cJSON_AddNumberToObject(j, "shake_peaks", beh_.shake_peaks);
@@ -2051,6 +2075,24 @@ private:
                 continue;
             }
 
+            // 舵机动作期间/刚结束时，马达启停与机构位移会把 SI12T 采样基线拉偏，
+            // 这段窗口内不参与触摸判定。用"预计动作结束时刻"覆盖移动全程+尾部；
+            // 面部追踪期默认不屏蔽（听说时摸头是常见互动），guard_track=true 时也屏蔽。
+            const uint32_t now_ms = (uint32_t)(now / 1000);
+            const uint32_t move_end_ms = servo_.LastMoveEndMs();
+            const int32_t since_move_end_ms = (int32_t)(uint32_t)(now_ms - move_end_ms);
+            const bool servo_recent = beh_.touch_guard_ms > 0 && move_end_ms != 0 &&
+                                      since_move_end_ms < beh_.touch_guard_ms;
+            const bool tracking = servo_.IsTracking();
+            const bool guard_now = servo_.IsAnimating() ||
+                                   (servo_recent && !(tracking && !beh_.touch_guard_skip_tracking));
+            if (guard_now) {
+                // 必须同步边沿状态并清空去抖计数，避免屏蔽结束时补一个假上升沿
+                touch_streak[0] = touch_streak[1] = touch_streak[2] = 0;
+                si12t_last_state_ = out;
+                continue;
+            }
+
             const int confirm_frames = beh_.touch_confirm_frames;
             const int64_t cooldown_us = (int64_t)beh_.touch_cooldown_s * 1000000LL;
             for (int zone = 0; zone < 3; zone++) {
@@ -2144,8 +2186,9 @@ private:
 
         mcp.AddTool("self.behavior.get_config",
             "Get the touch/pet and motion/shake behavior configuration. "
-            "Returns: touch_confirm_frames, touch_cooldown_s, pet_enabled, "
-            "motion_thresh_cg, shake_peaks, motion_cooldown_s, shake_enabled.",
+            "Returns: touch_confirm_frames, touch_cooldown_s, touch_guard_ms, "
+            "touch_guard_skip_tracking, pet_enabled, motion_thresh_cg, shake_peaks, "
+            "motion_cooldown_s, shake_enabled.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 return BehaviorCfgToJson();
@@ -2154,12 +2197,16 @@ private:
         mcp.AddTool("self.behavior.set",
             "Update interaction sensitivity. Omit a field (or pass -1 for integers) to keep it unchanged. "
             "touch_confirm_frames: 1-5 consecutive 100ms polls; touch_cooldown_s: 0-60; "
+            "touch_guard_ms: 0-5000 ms touch suppression after any servo movement; "
+            "touch_guard_skip_tracking: bool, also suppress while face tracking is active; "
             "pet_enabled: bool (head touch + screen long-press); motion_thresh_cg: 15-80 (0.15-0.80g); "
             "shake_peaks: 2-5 peaks within 1s; motion_cooldown_s: 0-600; shake_enabled: bool. "
             "Returns the full updated configuration.",
             PropertyList({
                 Property("touch_confirm_frames", kPropertyTypeInteger, -1, -1, kBehTouchFramesMax),
                 Property("touch_cooldown_s",     kPropertyTypeInteger, -1, -1, kBehTouchCooldownMax),
+                Property("touch_guard_ms",       kPropertyTypeInteger, -1, -1, kBehTouchGuardMax),
+                Property("touch_guard_skip_tracking", kPropertyTypeBoolean, false),
                 Property("pet_enabled",          kPropertyTypeBoolean, false),
                 Property("motion_thresh_cg",     kPropertyTypeInteger, -1, -1, kBehMotionThreshMax),
                 Property("shake_peaks",          kPropertyTypeInteger, -1, -1, kBehShakePeaksMax),
@@ -2175,6 +2222,11 @@ private:
                           beh_.touch_confirm_frames);
                 apply_int("touch_cooldown_s", kBehTouchCooldownMin, kBehTouchCooldownMax,
                           beh_.touch_cooldown_s);
+                apply_int("touch_guard_ms", kBehTouchGuardMin, kBehTouchGuardMax,
+                          beh_.touch_guard_ms);
+                if (props["touch_guard_skip_tracking"].provided()) {
+                    beh_.touch_guard_skip_tracking = props["touch_guard_skip_tracking"].value<bool>();
+                }
                 if (props["pet_enabled"].provided()) {
                     beh_.pet_enabled = props["pet_enabled"].value<bool>();
                 }
@@ -2189,8 +2241,9 @@ private:
                 }
 
                 SaveBehaviorCfg();
-                ESP_LOGI(TAG, "MCP behavior.set applied: touch_frames=%d touch_cool=%ds pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
-                         beh_.touch_confirm_frames, beh_.touch_cooldown_s, (int)beh_.pet_enabled,
+                ESP_LOGI(TAG, "MCP behavior.set applied: touch_frames=%d touch_cool=%ds guard=%dms track_guard=%d pet=%d motion_cg=%d shake_peaks=%d motion_cool=%ds shake=%d",
+                         beh_.touch_confirm_frames, beh_.touch_cooldown_s, beh_.touch_guard_ms,
+                         (int)beh_.touch_guard_skip_tracking, (int)beh_.pet_enabled,
                          beh_.motion_thresh_cg, beh_.shake_peaks, beh_.motion_cooldown_s, (int)beh_.shake_enabled);
                 return BehaviorCfgToJson();
             });
