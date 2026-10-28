@@ -1,4 +1,4 @@
-# Stackchan-Newstep: StackChan K151 单机多功能融合固件
+# Stackchan: StackChan K151 单机多功能融合固件
 
 基于 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 的 M5Stack Core S3 Stack-chan 增强固件（由 Stackchan-HtSz 演进）。在原版语音交互基础上增加了触摸、体感、情绪灯、舵机等**陪伴感**交互。
 
