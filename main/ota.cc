@@ -114,6 +114,10 @@ esp_err_t Ota::CheckVersion() {
     Settings nvs("wifi", false);
     std::string manual_url = nvs.GetString("ota_url");          // 用户手动设置（最高优先）
     std::string last_ok = nvs.GetString("ota_url_last_success");  // 上次成功节点（可选增强）
+    // 丢弃不再信任的旧记录（如已迁走的 NAS 地址），避免每次开机先白试一跳
+    bool last_ok_trusted = last_ok.rfind(CONFIG_OTA_URL, 0) == 0 ||
+                           last_ok.rfind(CONFIG_OTA_LAN_URL, 0) == 0;
+    if (!last_ok.empty() && !last_ok_trusted) last_ok.clear();
     if (!manual_url.empty()) candidates.push_back(manual_url);
     if (!last_ok.empty() && last_ok != manual_url) candidates.push_back(last_ok);
     candidates.push_back(CONFIG_OTA_LAN_URL);

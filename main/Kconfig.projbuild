@@ -24,7 +24,7 @@ config OTA_FALLBACK_URL
 
 config OTA_LAN_URL
     string "LAN OTA URL"
-    default "http://192.168.0.9:8003/xiaozhi/ota/"
+    default "http://xz.nealtea.cn:8003/xiaozhi/ota/"
     help
         Local network OTA URL, tried after the NVS ota_url and the last successful URL,
         before OTA_URL / OTA_FALLBACK_URL. Uses a short timeout (OTA_LAN_TIMEOUT_MS) so
